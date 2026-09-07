@@ -19,6 +19,12 @@
 
 #include <retro_common_api.h>
 
+/* One-cycle alias: builds that still pass the old switch get the
+ * in-tree modeline engine. */
+#if defined(HAVE_CRTSWITCHRES) && !defined(HAVE_MODELINE)
+#define HAVE_MODELINE
+#endif
+
 RETRO_BEGIN_DECLS
 
 enum
@@ -66,6 +72,25 @@ enum aspect_ratio
    ASPECT_RATIO_END
 };
 
+enum video_scale_integer_axis
+{
+   VIDEO_SCALE_INTEGER_AXIS_Y = 0,
+   VIDEO_SCALE_INTEGER_AXIS_Y_X,
+   VIDEO_SCALE_INTEGER_AXIS_Y_XHALF,
+   VIDEO_SCALE_INTEGER_AXIS_YHALF_XHALF,
+   VIDEO_SCALE_INTEGER_AXIS_X,
+   VIDEO_SCALE_INTEGER_AXIS_XHALF,
+   VIDEO_SCALE_INTEGER_AXIS_LAST
+};
+
+enum video_scale_integer_scaling
+{
+   VIDEO_SCALE_INTEGER_SCALING_UNDERSCALE = 0,
+   VIDEO_SCALE_INTEGER_SCALING_OVERSCALE,
+   VIDEO_SCALE_INTEGER_SCALING_SMART,
+   VIDEO_SCALE_INTEGER_SCALING_LAST
+};
+
 enum rotation
 {
    ORIENTATION_NORMAL = 0,
@@ -73,6 +98,42 @@ enum rotation
    ORIENTATION_FLIPPED,
    ORIENTATION_FLIPPED_ROTATED,
    ORIENTATION_END
+};
+
+enum video_rotation_type
+{
+   VIDEO_ROTATION_NORMAL = 0,
+   VIDEO_ROTATION_90_DEG,
+   VIDEO_ROTATION_180_DEG,
+   VIDEO_ROTATION_270_DEG
+};
+
+/* How hard to push for exclusive fullscreen where the platform lets the
+ * application decide (VK_EXT_full_screen_exclusive on Windows Vulkan). */
+enum video_fse_negotiation
+{
+   VIDEO_FSE_RELAXED = 0, /* hint only; the driver may decline */
+   VIDEO_FSE_FORCED,      /* take it explicitly and hold it    */
+   VIDEO_FSE_LAST
+};
+
+enum autoswitch_refresh_rate
+{
+   AUTOSWITCH_REFRESH_RATE_EXCLUSIVE_FULLSCREEN = 0,
+   AUTOSWITCH_REFRESH_RATE_WINDOWED_FULLSCREEN,
+   AUTOSWITCH_REFRESH_RATE_ALL_FULLSCREEN,
+   AUTOSWITCH_REFRESH_RATE_OFF,
+   AUTOSWITCH_REFRESH_RATE_LAST
+};
+
+enum time_show_type
+{
+   TIME_SHOW_OFF = 0,
+   TIME_SHOW_HM,
+   TIME_SHOW_HMS,
+   TIME_SHOW_HM_AMPM,
+   TIME_SHOW_HMS_AMPM,
+   TIME_SHOW_LAST
 };
 
 enum rarch_display_type
@@ -84,33 +145,10 @@ enum rarch_display_type
    /* video_display => N/A, video_window => HWND */
    RARCH_DISPLAY_WIN32,
    RARCH_DISPLAY_WAYLAND,
-   RARCH_DISPLAY_OSX
+   RARCH_DISPLAY_OSX,
+   RARCH_DISPLAY_KMS
 };
 
-enum font_driver_render_api
-{
-   FONT_DRIVER_RENDER_DONT_CARE,
-   FONT_DRIVER_RENDER_OPENGL_API,
-   FONT_DRIVER_RENDER_OPENGL_CORE_API,
-   FONT_DRIVER_RENDER_OPENGL1_API,
-   FONT_DRIVER_RENDER_D3D8_API,
-   FONT_DRIVER_RENDER_D3D9_API,
-   FONT_DRIVER_RENDER_D3D10_API,
-   FONT_DRIVER_RENDER_D3D11_API,
-   FONT_DRIVER_RENDER_D3D12_API,
-   FONT_DRIVER_RENDER_PS2,
-   FONT_DRIVER_RENDER_VITA2D,
-   FONT_DRIVER_RENDER_CTR,
-   FONT_DRIVER_RENDER_WIIU,
-   FONT_DRIVER_RENDER_VULKAN_API,
-   FONT_DRIVER_RENDER_METAL_API,
-   FONT_DRIVER_RENDER_CACA,
-   FONT_DRIVER_RENDER_SIXEL,
-   FONT_DRIVER_RENDER_NETWORK_VIDEO,
-   FONT_DRIVER_RENDER_GDI,
-   FONT_DRIVER_RENDER_VGA,
-   FONT_DRIVER_RENDER_SWITCH
-};
 
 enum text_alignment
 {
@@ -161,11 +199,6 @@ typedef struct gfx_ctx_flags
    uint32_t flags;
 } gfx_ctx_flags_t;
 
-struct Size2D
-{
-   unsigned width, height;
-};
-
 enum gfx_ctx_api
 {
    GFX_CTX_NONE = 0,
@@ -198,6 +231,7 @@ enum display_flags
    GFX_CTX_FLAGS_GL_CORE_CONTEXT,
    GFX_CTX_FLAGS_MULTISAMPLING,
    GFX_CTX_FLAGS_CUSTOMIZABLE_SWAPCHAIN_IMAGES,
+   GFX_CTX_FLAGS_CUSTOMIZABLE_FRAME_LATENCY,
    GFX_CTX_FLAGS_HARD_SYNC,
    GFX_CTX_FLAGS_BLACK_FRAME_INSERTION,
    GFX_CTX_FLAGS_MENU_FRAME_FILTERING,
@@ -207,7 +241,18 @@ enum display_flags
    GFX_CTX_FLAGS_SHADERS_HLSL,
    GFX_CTX_FLAGS_SHADERS_SLANG,
    GFX_CTX_FLAGS_SCREENSHOTS_SUPPORTED,
-   GFX_CTX_FLAGS_OVERLAY_BEHIND_MENU_SUPPORTED
+   GFX_CTX_FLAGS_OVERLAY_BEHIND_MENU_SUPPORTED,
+   GFX_CTX_FLAGS_CRT_SWITCHRES,
+   GFX_CTX_FLAGS_SUBFRAME_SHADERS,
+   GFX_CTX_FLAGS_FAST_TOGGLE_SHADERS,
+   /* Set by a video driver that can present a native XRGB2101010 (10-bit
+    * per channel) source frame without the frontend down-converting it to
+    * XRGB8888 first. */
+   GFX_CTX_FLAGS_SCREEN_10BPC_SOURCE,
+   /* Set by a context driver whose default framebuffer is FP16 scRGB
+    * (linear, 1.0 = 80 nits): the video driver must encode SDR content
+    * for HDR output itself (paper-white scaling etc.). */
+   GFX_CTX_FLAGS_SCRGB_FRAMEBUFFER
 };
 
 enum shader_uniform_type
@@ -229,6 +274,169 @@ enum shader_program_type
    SHADER_PROGRAM_FRAGMENT,
    SHADER_PROGRAM_COMBINED
 };
+
+/* All coordinates and offsets are top-left oriented.
+ *
+ * This is a texture-atlas approach which allows text to
+ * be drawn in a single draw call.
+ *
+ * It is up to the code using this interface to actually
+ * generate proper vertex buffers and upload the atlas texture to GPU. */
+
+struct font_glyph
+{
+   unsigned width;
+   unsigned height;
+
+   /* Texel coordinate offset for top-left pixel of this glyph. */
+   unsigned atlas_offset_x;
+   unsigned atlas_offset_y;
+
+   /* When drawing this glyph, apply an offset to
+    * current X/Y draw coordinate. */
+   int draw_offset_x;
+   int draw_offset_y;
+
+   /* Advance X/Y draw coordinates after drawing this glyph. */
+   int advance_x;
+   int advance_y;
+};
+
+/* Coverage bit depth of a font atlas. A8 is the default; A16 is
+ * produced when a higher-precision atlas was requested (HDR output)
+ * and the renderer supports it, with samples stored as native-endian
+ * uint16_t in 'buffer'. Consumers must check 'format' before
+ * interpreting the buffer or sizing uploads. */
+enum font_atlas_format
+{
+   FONT_ATLAS_FORMAT_A8 = 0,
+   FONT_ATLAS_FORMAT_A16
+};
+
+struct font_atlas
+{
+   uint8_t *buffer; /* Coverage samples; layout per 'format'. */
+   unsigned width;
+   unsigned height;
+   /* Dirty region in pixels, covering every glyph cell updated since
+    * the consumer last cleared the dirty flag; x1/y1 are exclusive
+    * and the values are only meaningful while dirty is set.
+    * Consumers may upload just this region (or any superset of it,
+    * such as the full-width row band) instead of the whole atlas. */
+   unsigned dirty_x0;
+   unsigned dirty_y0;
+   unsigned dirty_x1;
+   unsigned dirty_y1;
+   enum font_atlas_format format;
+   bool dirty;
+};
+
+struct font_params
+{
+   /* Drop shadow offset.
+    * If both are 0, no drop shadow will be rendered. */
+   int drop_x, drop_y;
+
+   /* ABGR. Use the macros. */
+   uint32_t color;
+
+   /* Optional full-precision colour. When non-NULL it points to 4 floats
+    * (R, G, B, A, each 0..1) that take precedence over the 8-bit 'color'
+    * above, letting a caller drive text at more than 8 bits per channel on a
+    * deep-colour (e.g. 10-bit) framebuffer. NULL means "use 'color'".
+    *
+    * Only honoured by font backends that opt in; the rest ignore it and use
+    * 'color', so it is always safe to leave set or unset. Because most
+    * font_params are built field by field, a producer that wants to use this
+    * MUST set it explicitly (to NULL or to a valid array) - do not assume it
+    * is zero-initialised. It is only ever read by backends fed from the
+    * central builders that initialise it (the menu text path and the OSD
+    * stat params), so an uninitialised value at other sites is never
+    * dereferenced. */
+   const float *color_hp;
+
+   float x;
+   float y;
+   float scale;
+   /* Drop shadow color multiplier. */
+   float drop_mod;
+   /* Drop shadow alpha */
+   float drop_alpha;
+
+   enum text_alignment text_align;
+
+   bool full_screen;
+};
+
+struct font_line_metrics
+{
+   float height;
+   float ascender;
+   float descender;
+};
+
+struct video_fbo_rect
+{
+   unsigned img_width;
+   unsigned img_height;
+   unsigned max_img_width;
+   unsigned max_img_height;
+   unsigned width;
+   unsigned height;
+};
+
+struct video_ortho
+{
+   float left;
+   float right;
+   float bottom;
+   float top;
+   float znear;
+   float zfar;
+};
+
+struct video_tex_info
+{
+   unsigned int tex;
+   float input_size[2];
+   float tex_size[2];
+   float coord[8];
+};
+
+typedef struct video_coords
+{
+   const float *vertex;
+   const float *color;
+   const float *tex_coord;
+   const float *lut_tex_coord;
+   const unsigned *index;
+   unsigned vertices;
+   unsigned indexes;
+} video_coords_t;
+
+typedef struct video_mut_coords
+{
+   float *vertex;
+   float *color;
+   float *tex_coord;
+   float *lut_tex_coord;
+   unsigned *index;
+   unsigned vertices;
+   unsigned indexes;
+} video_mut_coords_t;
+
+typedef struct video_coord_array
+{
+   video_mut_coords_t coords; /* ptr alignment */
+   unsigned allocated;
+} video_coord_array_t;
+
+typedef struct video_font_raster_block
+{
+   video_coord_array_t carr; /* ptr alignment */
+   bool fullscreen;
+} video_font_raster_block_t;
+
 
 RETRO_END_DECLS
 

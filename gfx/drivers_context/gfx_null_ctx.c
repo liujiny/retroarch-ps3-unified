@@ -21,7 +21,6 @@
 static void gfx_ctx_null_get_video_size(
       void *data, unsigned *width, unsigned *height)
 {
-   (void)data;
 #ifdef VITA
    *width  = 960;
    *height = 544;
@@ -82,5 +81,7 @@ const gfx_ctx_driver_t gfx_ctx_null = {
    gfx_ctx_null_set_flags,
    gfx_ctx_null_bind_hw_render,
    NULL,
-   NULL
+   NULL,
+   NULL, /* create_surface */
+   NULL  /* destroy_surface */
 };

@@ -14,11 +14,12 @@
  *  You should have received a copy of the GNU General Public License along with RetroArch.
  *  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <compat/strl.h>
+#include <string/stdstring.h>
 
 #include "../gfx_widgets.h"
 #include "../gfx_animation.h"
 #include "../gfx_display.h"
-#include "../../retroarch.h"
 
 #define GENERIC_MESSAGE_FADE_DURATION MSG_QUEUE_ANIMATION_DURATION
 
@@ -44,7 +45,7 @@ struct gfx_widget_generic_message_state
 
    unsigned message_duration;
 
-   gfx_timer_t timer;   /* float alignment */
+   float timer;   /* float alignment */
 
    float bg_x;
    float bg_y_start;
@@ -57,6 +58,8 @@ struct gfx_widget_generic_message_state
 
    float bg_color[16];
    float frame_color[16];
+
+   size_t message_len;
 
    enum gfx_widget_generic_message_status status;
 
@@ -73,7 +76,7 @@ static gfx_widget_generic_message_state_t p_w_generic_message_st = {
    0,                                  /* bg_height */
    0,                                  /* frame_width */
    0,                                  /* text_padding */
-   0xFFFFFFFF,                         /* text_color */
+   TEXT_COLOR_INFO,                    /* text_color */
 
    0,                                  /* message_duration */
 
@@ -88,8 +91,10 @@ static gfx_widget_generic_message_state_t p_w_generic_message_st = {
 
    0.0f,                               /* alpha */
 
-   COLOR_HEX_TO_FLOAT(0x3A3A3A, 1.0f), /* bg_color */
-   COLOR_HEX_TO_FLOAT(0x7A7A7A, 1.0f), /* frame_color */
+   COLOR_HEX_TO_FLOAT(BG_COLOR_DEFAULT, 1.0f), /* bg_color */
+   COLOR_HEX_TO_FLOAT(BG_COLOR_DEFAULT, 0.0f), /* frame_color */
+  
+   0,                                  /* message_len */
 
    GFX_WIDGET_GENERIC_MESSAGE_IDLE,    /* status */
 
@@ -168,17 +173,18 @@ void gfx_widget_set_generic_message(
    gfx_widget_font_data_t *font_msg_queue    = &p_dispwidget->gfx_widget_fonts.msg_queue;
 
    /* Ensure we have a valid message string */
-   if (string_is_empty(msg))
+   if (!msg || !*msg)
       return;
 
    /* Cache message parameters */
-   strlcpy(state->message, msg, sizeof(state->message));
+   state->message_len      = strlcpy(state->message,
+         msg, sizeof(state->message));
    state->message_duration = duration;
 
    /* Get background width */
    text_width         = font_driver_get_message_width(
          font_msg_queue->font, state->message,
-         (unsigned)strlen(state->message), 1.0f);
+         state->message_len, 1.0f);
    if (text_width < 0)
       text_width      = 0;
    state->bg_width    = (state->text_padding * 2) + (unsigned)text_width;
@@ -268,11 +274,11 @@ static void gfx_widget_generic_message_layout(
    /* Set background width */
    state->bg_width     = state->text_padding * 2;
 
-   if (!string_is_empty(state->message))
+   if (*state->message)
    {
       text_width       = font_driver_get_message_width(
             font_msg_queue->font, state->message,
-            (unsigned)strlen(state->message), 1.0f);
+            state->message_len, 1.0f);
       if (text_width < 0)
          text_width       = 0;
 
@@ -553,6 +559,12 @@ static void gfx_widget_generic_message_free(void)
 
 /* Widget definition */
 
+static bool gfx_widget_generic_message_visible(void)
+{
+   gfx_widget_generic_message_state_t *state = &p_w_generic_message_st;
+   return state->status != GFX_WIDGET_GENERIC_MESSAGE_IDLE;
+}
+
 const gfx_widget_t gfx_widget_generic_message = {
    NULL, /* init */
    gfx_widget_generic_message_free,
@@ -560,5 +572,6 @@ const gfx_widget_t gfx_widget_generic_message = {
    NULL, /* context_destroy */
    gfx_widget_generic_message_layout,
    gfx_widget_generic_message_iterate,
-   gfx_widget_generic_message_frame
+   gfx_widget_generic_message_frame,
+   gfx_widget_generic_message_visible
 };

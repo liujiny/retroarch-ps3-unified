@@ -38,19 +38,24 @@
 #define MSG_QUEUE_PENDING_MAX          32
 #define MSG_QUEUE_ONSCREEN_MAX         4
 
-#define MSG_QUEUE_ANIMATION_DURATION      330
-#define TASK_FINISHED_DURATION            3000
-#define HOURGLASS_INTERVAL                5000
-#define HOURGLASS_DURATION                1000
+#define MSG_QUEUE_ANIMATION_DURATION   330
+#define TASK_FINISHED_DURATION         3000
+#define HOURGLASS_INTERVAL             5000
+#define HOURGLASS_DURATION             1000
 
-/* TODO: Colors for warning, error and success */
+#define TEXT_COLOR_INFO   0xEEEEEEFF
+#define TEXT_COLOR_FAINT  0x888888FF
 
-#define TEXT_COLOR_INFO 0xD8EEFFFF
-#if 0
-#define TEXT_COLOR_SUCCESS 0x22B14CFF
-#define TEXT_COLOR_ERROR 0xC23B22FF
-#endif
-#define TEXT_COLOR_FAINT 0x878787FF
+#define BG_COLOR_BLACK    0x000000
+#define BG_COLOR_WHITE    0xFFFFFF
+#define BG_COLOR_DEFAULT  0x161616
+#define BG_COLOR_PROGRESS 0x323232
+#define BG_COLOR_MARGIN   0xBBBBBB
+
+#define ICON_COLOR_RED    0xD82020
+#define ICON_COLOR_GREEN  0x20D820
+#define ICON_COLOR_BLUE   0x208BD8
+#define ICON_COLOR_YELLOW 0xD8BA20
 
 RETRO_BEGIN_DECLS
 
@@ -63,6 +68,8 @@ enum gfx_widgets_icon
 
    MENU_WIDGETS_ICON_HOURGLASS,
    MENU_WIDGETS_ICON_CHECK,
+   MENU_WIDGETS_ICON_ADD,
+   MENU_WIDGETS_ICON_EXIT,
 
    MENU_WIDGETS_ICON_INFO,
 
@@ -88,6 +95,51 @@ enum notification_show_screenshot_flash
    NOTIFICATION_SHOW_SCREENSHOT_FLASH_LAST
 };
 
+enum cheevos_appearance_anchor
+{
+   CHEEVOS_APPEARANCE_ANCHOR_TOPLEFT = 0,
+   CHEEVOS_APPEARANCE_ANCHOR_TOPCENTER,
+   CHEEVOS_APPEARANCE_ANCHOR_TOPRIGHT,
+   CHEEVOS_APPEARANCE_ANCHOR_BOTTOMLEFT,
+   CHEEVOS_APPEARANCE_ANCHOR_BOTTOMCENTER,
+   CHEEVOS_APPEARANCE_ANCHOR_BOTTOMRIGHT,
+   CHEEVOS_APPEARANCE_ANCHOR_LAST
+};
+
+enum disp_widget_flags_enum
+{
+   DISPWIDG_FLAG_TASK_FINISHED             = (1 << 0),
+   DISPWIDG_FLAG_TASK_ERROR                = (1 << 1),
+   DISPWIDG_FLAG_TASK_CANCELLED            = (1 << 2),
+   DISPWIDG_FLAG_EXPIRATION_TIMER_STARTED  = (1 << 3),
+   /* Is it currently doing the fade out animation ? */
+   DISPWIDG_FLAG_DYING                     = (1 << 4),
+   /* Has the timer expired ? if so, should be set to dying */
+   DISPWIDG_FLAG_EXPIRED                   = (1 << 5),
+   /* Color style */
+   DISPWIDG_FLAG_POSITIVE                  = (1 << 6),
+   DISPWIDG_FLAG_NEGATIVE                  = (1 << 7),
+   DISPWIDG_FLAG_CATEGORY_WARNING          = (1 << 8),
+   DISPWIDG_FLAG_CATEGORY_ERROR            = (1 << 9),
+   DISPWIDG_FLAG_CATEGORY_SUCCESS          = (1 << 10),
+   /* Size */
+   DISPWIDG_FLAG_SMALL                     = (1 << 11),
+   /* Was this widget spawned by a task? Sticky for the lifetime of
+    * the widget; unlike task_ptr, which is a liveness link that may
+    * legitimately be cleared while the widget is still on screen. */
+   DISPWIDG_FLAG_TASK                      = (1 << 12)
+};
+
+/* There can only be one message animation at a time to
+ * avoid confusing users */
+enum dispgfx_widget_flags
+{
+   DISPGFX_WIDGET_FLAG_MSG_QUEUE_HAS_ICONS = (1 << 0),
+   DISPGFX_WIDGET_FLAG_PERSISTING          = (1 << 1),
+   DISPGFX_WIDGET_FLAG_MOVING              = (1 << 2),
+   DISPGFX_WIDGET_FLAG_INITED              = (1 << 3)
+};
+
 /* This structure holds all objects + metadata
  * corresponding to a particular font */
 typedef struct
@@ -100,7 +152,13 @@ typedef struct
    float line_ascender;
    float line_descender;
    float line_centre_offset;
+   /* font_driver generation the values above were computed at. A font
+    * rebuilt underneath - a language switch picks a different face -
+    * moves the generation and they are worked out again. */
+   uint32_t metrics_generation;
 } gfx_widget_font_data_t;
+
+void gfx_widgets_font_sync(gfx_widget_font_data_t *font_data);
 
 /* Font data */
 typedef struct
@@ -115,11 +173,9 @@ typedef struct disp_widget_msg
    char *msg;
    char *msg_new;
    retro_task_t *task_ptr;
-   /* Used to detect title change */
-   char *task_title_ptr;
 
    uint32_t task_ident;
-   unsigned msg_len;
+   size_t   msg_len;
    unsigned duration;
    unsigned text_height;
    unsigned width;
@@ -129,24 +185,14 @@ typedef struct disp_widget_msg
    float alpha;
    float unfold;
    float hourglass_rotation;
-   gfx_timer_t hourglass_timer; /* float alignment */
-   gfx_timer_t expiration_timer; /* float alignment */
+   float hourglass_timer; /* float alignment */
+   float expiration_timer; /* float alignment */
 
+   uint16_t flags;
    int8_t task_progress;
    /* How many tasks have used this notification? */
    uint8_t task_count;
-
-   bool task_finished;
-   bool task_error;
-   bool task_cancelled;
-   bool expiration_timer_started;
-   /* Is it currently doing the fade out animation ? */
-   bool dying;
-   /* Has the timer expired ? if so, should be set to dying */
-   bool expired;
-   /* Unfold animation */
-   bool unfolded;
-   bool unfolding;
+   bool alternative_look;
 } disp_widget_msg_t;
 
 typedef struct dispgfx_widget
@@ -155,6 +201,22 @@ typedef struct dispgfx_widget
 
 #ifdef HAVE_THREADS
    slock_t* current_msgs_lock;
+   /* Serialises producer and consumer access to msg_queue.
+    * Producers (gfx_widgets_msg_queue_push) can be called from
+    * any thread -- the threaded task system at libretro-common/
+    * queues/task_queue.c runs a worker thread, and several call
+    * paths reach the producer without holding any other lock
+    * (notably gfx/video_driver.c::video_driver_frame, which
+    * releases RUNLOOP_MSG_QUEUE_LOCK before the call).  The
+    * consumer (gfx_widgets_iterate) runs on the main thread
+    * but did not previously serialise its fifo_read against
+    * concurrent producer fifo_writes.  This separates concerns:
+    * current_msgs_lock continues to guard the displayed-message
+    * deque (current_msgs[]); msg_queue_lock guards the FIFO
+    * staging buffer.  Acquired by every fifo_* call site and
+    * by FIFO_*_AVAIL checks where the result is used to gate a
+    * subsequent FIFO operation. */
+   slock_t* msg_queue_lock;
 #endif
    fifo_buffer_t msg_queue;
    disp_widget_msg_t* current_msgs[MSG_QUEUE_ONSCREEN_MAX];
@@ -173,7 +235,11 @@ typedef struct dispgfx_widget
    size_t current_msgs_size;
 
 #ifdef HAVE_TRANSLATE
-   int ai_service_overlay_state;
+   /* ai_service_overlay_state moved out of this struct: the video
+    * thread advances 2 -> 3 in gfx_widgets_frame() while the main
+    * thread drives every other transition, so it needs release/acquire
+    * rather than a plain int.  Kept out of the struct so the atomic
+    * type is not exposed in this header. */
 #endif
 
    unsigned last_video_width;
@@ -186,24 +252,19 @@ typedef struct dispgfx_widget
    unsigned simple_widget_height;
 
    /* Used for both generic and libretro messages */
-   unsigned generic_message_height;
-
    unsigned msg_queue_height;
+   unsigned msg_queue_padding;
    unsigned msg_queue_spacing;
    unsigned msg_queue_rect_start_x;
    unsigned msg_queue_internal_icon_size;
-   unsigned msg_queue_internal_icon_offset;
    unsigned msg_queue_icon_size_x;
    unsigned msg_queue_icon_size_y;
    unsigned msg_queue_icon_offset_y;
    unsigned msg_queue_scissor_start_x;
-   unsigned msg_queue_default_rect_width_menu_alive;
    unsigned msg_queue_default_rect_width;
    unsigned msg_queue_regular_padding_x;
    unsigned msg_queue_regular_text_start;
    unsigned msg_queue_task_text_start_x;
-   unsigned msg_queue_task_rect_start_x;
-   unsigned msg_queue_task_hourglass_x;
    unsigned divider_width_1px;
 
    float last_scale_factor;
@@ -215,20 +276,44 @@ typedef struct dispgfx_widget
    unsigned ai_service_overlay_height;
 #endif
 
-   char gfx_widgets_status_text[255];
-
-   /* There can only be one message animation at a time to 
-    * avoid confusing users */
-   bool moving;
-   bool inited;
+   uint8_t flags;
+   /* Kept next to 'flags' rather than at the end of the struct.  It is
+    * read once or twice per frame from the video and runloop paths
+    * (gfx/video_driver.c, runloop.c) while nothing else near the tail
+    * is touched, so at the end it cost a cache line of its own that
+    * carried a single byte; here it shares the line 'flags' already
+    * pulls in every frame for gfx_widgets_frame().  It lands in
+    * padding that existed anyway ahead of the status text, so this
+    * costs nothing: sizeof(dispgfx_widget_t) drops by 8, because the
+    * byte and its trailing pad at the end of the struct are
+    * reclaimed.  Its address is taken as an opaque animation tag in
+    * retroarch.c -- only uniqueness matters there, not the value. */
    bool active;
-   bool persisting;
-   bool msg_queue_has_icons;
+
+   char gfx_widgets_status_text[NAME_MAX_LENGTH];
+   /* Cached strlen of gfx_widgets_status_text, written by the
+    * producer in video_driver.c.  Lets the per-frame widget render
+    * skip a strlen on a string that can be up to NAME_MAX_LENGTH
+    * (256) bytes long when statistics or core status messages are
+    * active.  Zero means the buffer is empty. */
+   size_t gfx_widgets_status_text_len;
+   char assets_pkg_dir[DIR_MAX_LENGTH];
+   char xmb_path[PATH_MAX_LENGTH];                /* TODO/FIXME - decouple from XMB */
+   char ozone_path[PATH_MAX_LENGTH];              /* TODO/FIXME - decouple from Ozone */
+   char ozone_regular_font_path[PATH_MAX_LENGTH]; /* TODO/FIXME - decouple from Ozone */
+   char ozone_bold_font_path[PATH_MAX_LENGTH];    /* TODO/FIXME - decouple from Ozone */
+
+   /* The notification font path the widget fonts are built from.
+    * gfx_widgets_iterate() watches it alongside last_scale_factor and
+    * rebuilds them in place when it moves. */
+   char last_font_path[PATH_MAX_LENGTH];
+
+   char monochrome_png_path[PATH_MAX_LENGTH];
+   char gfx_widgets_path[PATH_MAX_LENGTH];
 } dispgfx_widget_t;
 
-
 /* A widget */
-/* TODO: cleanup all unused parameters */
+/* TODO/FIXME: cleanup all unused parameters */
 struct gfx_widget
 {
    /* called when the widgets system is initialized
@@ -271,6 +356,11 @@ struct gfx_widget
     * -- userdata is a dispgfx_widget_t
     * -> draw the widget here */
    void (*frame)(void* data, void *userdata);
+
+   /* called to check if the widget is currently
+    * drawing anything on screen
+    * -> return true if the widget is active */
+   bool (*visible)(void);
 };
 
 float gfx_widgets_get_thumbnail_scale_factor(
@@ -286,7 +376,9 @@ void gfx_widgets_draw_icon(
       unsigned icon_height,
       uintptr_t texture,
       float x, float y,
-      float rotation, float scale_factor,
+      float radians,
+      float cosine,
+      float sine,
       float *color);
 
 void gfx_widgets_draw_text(
@@ -317,6 +409,7 @@ void gfx_widgets_deinit(bool widgets_persisting);
 
 void gfx_widgets_msg_queue_push(
       retro_task_t *task, const char *msg,
+      size_t len,
       unsigned duration,
       char *title,
       enum message_queue_icon icon,
@@ -337,6 +430,9 @@ void gfx_widgets_iterate(
 void gfx_widget_screenshot_taken(void *data,
       const char *shotname, const char *filename);
 
+void gfx_widget_state_slot_show(void *data,
+      const char *shotname, const char *filename);
+
 /* AI Service functions */
 #ifdef HAVE_TRANSLATE
 bool gfx_widgets_ai_service_overlay_load(
@@ -344,12 +440,25 @@ bool gfx_widgets_ai_service_overlay_load(
       enum image_type_enum image_type);
 
 void gfx_widgets_ai_service_overlay_unload(void);
+
+/* AI service overlay handshake.  0 idle, 1 texture loaded, 2 awaiting a
+ * frame, 3 drawn once.  Only the 2 -> 3 step runs on the video thread;
+ * every other transition is main.  Acquire/release so the texture
+ * published before a transition is visible to the observer. */
+int  gfx_widgets_ai_service_overlay_get_state(void);
+void gfx_widgets_ai_service_overlay_set_state(int state);
 #endif
 
 #ifdef HAVE_CHEEVOS
+void gfx_widgets_update_cheevos_appearance(void);
 void gfx_widgets_push_achievement(const char *title, const char* subtitle, const char *badge);
 void gfx_widgets_set_leaderboard_display(unsigned id, const char* value);
+void gfx_widgets_clear_leaderboard_displays(void);
 void gfx_widgets_set_challenge_display(unsigned id, const char* badge);
+void gfx_widgets_clear_challenge_displays(void);
+void gfx_widget_set_achievement_progress(const char* badge, const char* progress);
+void gfx_widget_set_cheevos_disconnect(bool visible);
+void gfx_widget_set_cheevos_set_loading(bool visible);
 #endif
 
 /* TODO/FIXME/WARNING: Not thread safe! */
@@ -362,10 +471,16 @@ void gfx_widget_set_progress_message(
       unsigned priority, int8_t progress);
 bool gfx_widget_start_load_content_animation(void);
 
+/* Percentage shown after the content name while the content is still
+ * being read, or -1 for none. */
+void gfx_widget_set_load_content_progress(int8_t progress);
+
 /* All the functions below should be called in
  * the video driver - once they are all added, set
  * enable_menu_widgets to true for that driver */
 void gfx_widgets_frame(void *data);
+
+bool gfx_widgets_visible(void *data);
 
 bool gfx_widgets_ready(void);
 

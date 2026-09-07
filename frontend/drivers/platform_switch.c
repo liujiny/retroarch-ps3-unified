@@ -1,13 +1,28 @@
+/* RetroArch - A frontend for libretro.
+ * Copyright (C) 2010-2014 - Hans-Kristian Arntzen
+ * Copyright (C) 2011-2017 - Daniel De Matteis
+ *
+ * RetroArch is free software: you can redistribute it and/or modify it under the terms
+ * of the GNU General Public License as published by the Free Software Found-
+ * ation, either version 3 of the License, or (at your option) any later version.
+ *
+ * RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ * without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ * PURPOSE. See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License along with RetroArch.
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
 #include <stdint.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
 #include <boolean.h>
 #include <sys/stat.h>
-#include <errno.h>
 #include <dirent.h>
 
-#include <file/nbio.h>
 #include <formats/image.h>
 
 #ifdef HAVE_LIBNX
@@ -34,21 +49,26 @@
 #include <string/stdstring.h>
 
 #include "../frontend_driver.h"
-#include "../../verbosity.h"
 #include "../../defaults.h"
+#include "../../file_path_special.h"
 #include "../../paths.h"
 #include "../../retroarch.h"
-#include "../../file_path_special.h"
+#include "../../verbosity.h"
 
 #ifndef IS_SALAMANDER
 #ifdef HAVE_MENU
 #include "../../menu/menu_driver.h"
 #endif
+
+#if defined(HAVE_LIBNX) && defined(HAVE_NETWORKING)
+#include "../../network/netplay/netplay.h"
+#endif
 #endif
 
 #ifdef HAVE_LIBNX
 #define SD_PREFIX
-#include "../../gfx/common/switch_common.h"
+#include "../../gfx/common/switch_defines.h"
+#include <compat/strl.h>
 #else
 #define SD_PREFIX "/sd"
 #endif
@@ -57,6 +77,37 @@ static enum frontend_fork switch_fork_mode = FRONTEND_FORK_NONE;
 bool platform_switch_has_focus = true;
 
 #ifdef HAVE_LIBNX
+char *SWITCH_CPU_PROFILES[] = {
+    "Maximum Performance",
+    "High Performance",
+    "Boost Performance",
+    "Stock Performance",
+    "Powersaving Mode 1",
+    "Powersaving Mode 2",
+    "Powersaving Mode 3",
+    NULL
+};
+char *SWITCH_CPU_SPEEDS[] = {
+    "1785 MHz",
+    "1581 MHz",
+    "1224 MHz",
+    "1020 MHz",
+    "918 MHz",
+    "816 MHz",
+    "714 MHz",
+    NULL
+};
+unsigned SWITCH_CPU_SPEEDS_VALUES[] = {
+    1785000000,
+    1581000000,
+    1224000000,
+    1020000000,
+    918000000,
+    816000000,
+    714000000,
+    0
+};
+
 static bool psmInitialized  = false;
 
 static AppletHookCookie applet_hook_cookie;
@@ -67,8 +118,8 @@ extern bool nxlink_connected;
 
 void libnx_apply_overclock(void)
 {
-   const size_t profiles_count = sizeof(SWITCH_CPU_PROFILES) 
-      / sizeof(SWITCH_CPU_PROFILES[1]);
+   const size_t profiles_count = sizeof(SWITCH_CPU_PROFILES)
+      / sizeof(SWITCH_CPU_PROFILES[1]) - 1;
    settings_t *settings        = config_get_ptr();
    unsigned libnx_overclock    = settings->uints.libnx_overclock;
 
@@ -97,14 +148,12 @@ static void on_applet_hook(AppletHookType hook, void *param)
    switch (hook)
    {
       case AppletHookType_OnExitRequest:
-         RARCH_LOG("Got AppletHook OnExitRequest, exiting.\n");
          retroarch_main_quit();
          break;
 
          /* Focus state*/
       case AppletHookType_OnFocusState:
          focus_state = appletGetFocusState();
-         RARCH_LOG("Got AppletHook OnFocusState - new focus state is %d\n", focus_state);
          platform_switch_has_focus = focus_state == AppletFocusState_InFocus;
 
          if (!platform_switch_has_focus)
@@ -146,18 +195,23 @@ static void get_first_valid_core(char *path_return, size_t len)
 
    path_return[0] = '\0';
 
-   dir = opendir(SD_PREFIX "/retroarch/cores");
-   if (dir)
+   if ((dir = opendir(SD_PREFIX "/retroarch/cores")))
    {
+      size_t ext_len = strlen(extension);
       while ((ent = readdir(dir)))
       {
+         size_t name_len;
          if (!ent)
             break;
-         if (strlen(ent->d_name) > strlen(extension) && !strcmp(ent->d_name + strlen(ent->d_name) - strlen(extension), extension))
+         name_len = strlen(ent->d_name);
+         if (   name_len > ext_len
+             && !strcmp(ent->d_name + name_len - ext_len, extension))
          {
-            strcpy_literal(path_return, SD_PREFIX "/retroarch/cores");
-            strlcat(path_return, "/", len);
-            strlcat(path_return, ent->d_name, len);
+            size_t _len = strlcpy(path_return, SD_PREFIX "/retroarch/cores", len);
+            _len += strlcpy_lit(path_return + _len,
+                  "/",
+                  len           - _len);
+            strlcpy(path_return + _len, ent->d_name, len - _len);
             break;
          }
       }
@@ -179,7 +233,6 @@ static void frontend_switch_get_env(
 #endif
 
    fill_pathname_basedir(g_defaults.dirs[DEFAULT_DIR_PORT], SD_PREFIX "/retroarch/retroarch_switch.nro", sizeof(g_defaults.dirs[DEFAULT_DIR_PORT]));
-   RARCH_LOG("port dir: [%s]\n", g_defaults.dirs[DEFAULT_DIR_PORT]);
 
    fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_CORE], g_defaults.dirs[DEFAULT_DIR_PORT],
                       "cores", sizeof(g_defaults.dirs[DEFAULT_DIR_CORE]));
@@ -217,9 +270,6 @@ static void frontend_switch_get_env(
    fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_RECORD_OUTPUT], g_defaults.dirs[DEFAULT_DIR_PORT],
                       "records", sizeof(g_defaults.dirs[DEFAULT_DIR_RECORD_OUTPUT]));
 
-   fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_CURSOR], g_defaults.dirs[DEFAULT_DIR_PORT],
-                      "database/cursors", sizeof(g_defaults.dirs[DEFAULT_DIR_CURSOR]));
-
    fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_DATABASE], g_defaults.dirs[DEFAULT_DIR_PORT],
                       "database/rdb", sizeof(g_defaults.dirs[DEFAULT_DIR_DATABASE]));
 
@@ -233,12 +283,10 @@ static void frontend_switch_get_env(
                       "cheats", sizeof(g_defaults.dirs[DEFAULT_DIR_CHEATS]));
 
    fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_OVERLAY], g_defaults.dirs[DEFAULT_DIR_PORT],
-                      "overlay", sizeof(g_defaults.dirs[DEFAULT_DIR_OVERLAY]));
+                      "overlays", sizeof(g_defaults.dirs[DEFAULT_DIR_OVERLAY]));
 
-#ifdef HAVE_VIDEO_LAYOUT
-   fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_VIDEO_LAYOUT], g_defaults.dirs[DEFAULT_DIR_PORT],
-                      "layouts", sizeof(g_defaults.dirs[DEFAULT_DIR_VIDEO_LAYOUT]));
-#endif
+   fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_OSK_OVERLAY], g_defaults.dirs[DEFAULT_DIR_PORT],
+                      "overlays/keyboards", sizeof(g_defaults.dirs[DEFAULT_DIR_OSK_OVERLAY]));
 
    fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_CORE_ASSETS], g_defaults.dirs[DEFAULT_DIR_PORT],
                       "downloads", sizeof(g_defaults.dirs[DEFAULT_DIR_CORE_ASSETS]));
@@ -251,11 +299,13 @@ static void frontend_switch_get_env(
 
    fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_LOGS], g_defaults.dirs[DEFAULT_DIR_PORT],
                       "logs", sizeof(g_defaults.dirs[DEFAULT_DIR_LOGS]));
+   fill_pathname_join(g_defaults.dirs[DEFAULT_DIR_CACHE], g_defaults.dirs[DEFAULT_DIR_PORT],
+                      "temp", sizeof(g_defaults.dirs[DEFAULT_DIR_CACHE]));
 
    for (i = 0; i < DEFAULT_DIR_LAST; i++)
    {
       const char *dir_path = g_defaults.dirs[i];
-      if (!string_is_empty(dir_path))
+      if (dir_path && *dir_path)
          path_mkdir(dir_path);
    }
 
@@ -304,46 +354,49 @@ static void frontend_switch_deinit(void *data)
 #ifdef HAVE_LIBNX
 static void frontend_switch_exec(const char *path, bool should_load_game)
 {
-   char game_path[PATH_MAX-4];
-   game_path[0]       = '\0';
+   if (path && *path)
+   {
+      char args[PATH_MAX];
 
-   RARCH_LOG("Attempt to load core: [%s].\n", path);
+      strlcpy(args, path, sizeof(args));
 
 #ifndef IS_SALAMANDER
-   if (should_load_game && !path_is_empty(RARCH_PATH_CONTENT))
-   {
-      strlcpy(game_path, path_get(RARCH_PATH_CONTENT), sizeof(game_path));
-      RARCH_LOG("content path: [%s].\n", path_get(RARCH_PATH_CONTENT));
-   }
-#endif
-
-   if (path && path[0])
-   {
-#ifdef IS_SALAMANDER
-      struct stat sbuff;
-      bool file_exists = stat(path, &sbuff) == 0;
-
-      if (!file_exists)
-      {
-         char core_path[PATH_MAX];
-
-         /* find first valid core and load it if the target core doesnt exist */
-         get_first_valid_core(&core_path[0], PATH_MAX);
-
-         if (core_path[0] == '\0')
-            svcExitProcess();
-      }
-#endif
-      char *arg_buffer = (char *)malloc(PATH_MAX);
       if (should_load_game)
-         snprintf(arg_buffer, PATH_MAX, "%s \"%s\"", path, game_path);
-      else
       {
-         arg_buffer[0] = '\0';
-         strlcpy(arg_buffer, path, PATH_MAX);
+         const char *content = path_get(RARCH_PATH_CONTENT);
+#ifdef HAVE_NETWORKING
+         char *arg_data[NETPLAY_FORK_MAX_ARGS];
+         if (netplay_driver_ctl(RARCH_NETPLAY_CTL_GET_FORK_ARGS,
+               (void*)arg_data))
+         {
+            char buf[PATH_MAX];
+            char **arg = arg_data;
+            do
+            {
+               snprintf(buf, sizeof(buf), " \"%s\"", *arg);
+               strlcat(args, buf, sizeof(args));
+            } while (*(++arg));
+         }
+         else
+#endif
+         if (content && *content)
+            snprintf(args, sizeof(args), "%s \"%s\"", path, content);
       }
+#else
+      {
+         struct stat sbuff;
 
-      envSetNextLoad(path, arg_buffer);
+         if (stat(path, &sbuff))
+         {
+            char core_path[PATH_MAX];
+            get_first_valid_core(core_path, sizeof(core_path));
+            if (!core_path || !*core_path)
+               svcExitProcess();
+         }
+      }
+#endif
+
+      envSetNextLoad(path, args);
    }
 }
 
@@ -353,15 +406,12 @@ static bool frontend_switch_set_fork(enum frontend_fork fork_mode)
    switch (fork_mode)
    {
    case FRONTEND_FORK_CORE:
-      RARCH_LOG("FRONTEND_FORK_CORE\n");
       switch_fork_mode = fork_mode;
       break;
    case FRONTEND_FORK_CORE_WITH_ARGS:
-      RARCH_LOG("FRONTEND_FORK_CORE_WITH_ARGS\n");
       switch_fork_mode = fork_mode;
       break;
    case FRONTEND_FORK_RESTART:
-      RARCH_LOG("FRONTEND_FORK_RESTART\n");
       /*  NOTE: We don't implement Salamander, so just turn
              this into FRONTEND_FORK_CORE. */
       switch_fork_mode = FRONTEND_FORK_CORE;
@@ -441,7 +491,7 @@ char *realpath(const char *name, char *resolved)
 
    if (!resolved)
    {
-      rpath = malloc(path_max);
+      rpath = (char*)malloc(path_max);
       if (!rpath)
          return NULL;
    }
@@ -551,7 +601,7 @@ static void frontend_switch_init(void *data)
    bool recording_supported      = false;
 
    nifmInitialize(NifmServiceType_User);
-   
+
    if (hosversionBefore(8, 0, 0))
       pcvInitialize();
    else
@@ -577,13 +627,8 @@ static void frontend_switch_init(void *data)
    if (R_SUCCEEDED(rc))
        psmInitialized = true;
    else
-       RARCH_WARN("Error initializing psm\n");
+       RARCH_WARN("Error initializing psm.\n");
 #endif /* HAVE_LIBNX (splash) */
-}
-
-static int frontend_switch_get_rating(void)
-{
-   return 11;
 }
 
 enum frontend_architecture frontend_switch_get_arch(void)
@@ -595,35 +640,23 @@ static int frontend_switch_parse_drive_list(void *data, bool load_content)
 {
 #ifndef IS_SALAMANDER
    file_list_t *list = (file_list_t *)data;
-   enum msg_hash_enums enum_idx = load_content 
-      ? MENU_ENUM_LABEL_FILE_DETECT_CORE_LIST_PUSH_DIR 
+   enum msg_hash_enums enum_idx = load_content
+      ? MENU_ENUM_LABEL_FILE_DETECT_CORE_LIST_PUSH_DIR
       : MENU_ENUM_LABEL_FILE_BROWSER_DIRECTORY;
 
    if (!list)
       return -1;
 
-   menu_entries_append_enum(list,
+   menu_entries_append(list,
          "/", msg_hash_to_str(MENU_ENUM_LABEL_FILE_DETECT_CORE_LIST_PUSH_DIR),
          enum_idx,
-         FILE_TYPE_DIRECTORY, 0, 0);
+         FILE_TYPE_DIRECTORY, 0, 0, NULL);
 #endif
 
    return 0;
 }
 
-static uint64_t frontend_switch_get_free_mem(void)
-{
-   struct mallinfo mem_info = mallinfo();
-   return mem_info.fordblks;
-}
-
-static uint64_t frontend_switch_get_total_mem(void)
-{
-   struct mallinfo mem_info = mallinfo();
-   return mem_info.usmblks;
-}
-
-static enum frontend_powerstate 
+static enum frontend_powerstate
 frontend_switch_get_powerstate(int *seconds, int *percent)
 {
    uint32_t pct;
@@ -657,9 +690,10 @@ frontend_switch_get_powerstate(int *seconds, int *percent)
    return FRONTEND_POWERSTATE_NO_SOURCE;
 }
 
-static void frontend_switch_get_os(
+static size_t frontend_switch_get_os(
       char *s, size_t len, int *major, int *minor)
 {
+   size_t _len;
 #ifdef HAVE_LIBNX
    u32 hosVersion;
 #else
@@ -670,7 +704,7 @@ static void frontend_switch_get_os(
    ipc_request_t rq;
 #endif
 
-   strcpy_literal(s, "Horizon OS");
+   _len       = strlcpy_lit(s, "Horizon OS", len);
 
 #ifdef HAVE_LIBNX
    *major     = 0;
@@ -695,32 +729,67 @@ static void frontend_switch_get_os(
 
    LIB_ASSERT_OK(fail_object, ipc_send(set_sys, &rq, &ipc_default_response_fmt));
 
-   sscanf(firmware_version + 0x68, "%d.%d.%d", major, minor, &patch);
+   /* Parse "<major>.<minor>.<patch>" without sscanf.
+    * Matches prior best-effort semantics: a field that fails to
+    * parse leaves itself and subsequent fields at their current
+    * values. */
+   {
+      const char *p = firmware_version + 0x68;
+      char       *endp;
+      long        v;
+
+      v = strtol(p, &endp, 10);
+      if (endp != p)
+      {
+         *major = (int)v;
+         if (*endp == '.')
+         {
+            p = endp + 1;
+            v = strtol(p, &endp, 10);
+            if (endp != p)
+            {
+               *minor = (int)v;
+               if (*endp == '.')
+               {
+                  p = endp + 1;
+                  v = strtol(p, &endp, 10);
+                  if (endp != p)
+                     patch = (int)v;
+               }
+            }
+         }
+      }
+   }
 
 fail_object:
    ipc_close(set_sys);
 fail_sm:
    sm_finalize();
 fail:
-   return;
 #endif
+   return _len;
 }
 
 static void frontend_switch_get_name(char *s, size_t len)
 {
-   /* TODO: Add Mariko at some point */
-   strcpy_literal(s, "Nintendo Switch");
+   /* TODO/FIXME: Add Mariko at some point */
+   strlcpy_lit(s, "Nintendo Switch", len);
 }
 
 void frontend_switch_process_args(int *argc, char *argv[])
 {
-#ifdef HAVE_STATIC_DUMMY
-   if (*argc >= 1)
-   {
-      /* Ensure current Path is set, only works for the static dummy, likely a hbloader args Issue (?) */
+   /* When launched through hbloader (hbmenu, a forwarder, or a
+    * fork via envSetNextLoad), argv[0] is the path of the NRO
+    * this process is running and is the authoritative core
+    * identity: RARCH_PATH_CORE may otherwise carry a stale value
+    * read from the salamander config at startup, naming a core
+    * other than the one statically linked into this binary.
+    * Menu-triggered content loads pass a synthesised argv whose
+    * argv[0] is the literal "retroarch", so only accept values
+    * that actually name an NRO. */
+   if (     (*argc >= 1)
+         && string_is_equal_noncase(path_get_extension(argv[0]), "nro"))
       path_set(RARCH_PATH_CORE, argv[0]);
-   }
-#endif
 }
 
 frontend_ctx_driver_t frontend_ctx_switch =
@@ -746,13 +815,10 @@ frontend_ctx_driver_t frontend_ctx_switch =
    frontend_switch_shutdown,
    frontend_switch_get_name,
    frontend_switch_get_os,
-   frontend_switch_get_rating,
    NULL,                               /* content_loaded */
    frontend_switch_get_arch,           /* get_architecture       */
    frontend_switch_get_powerstate,     /* get_powerstate         */
    frontend_switch_parse_drive_list,   /* parse_drive_list       */
-   frontend_switch_get_total_mem,      /* get_total_mem          */
-   frontend_switch_get_free_mem,       /* get_free_mem           */
    NULL,                               /* install_signal_handler */
    NULL,                               /* get_signal_handler_state */
    NULL,                               /* set_signal_handler_state */
@@ -761,14 +827,13 @@ frontend_ctx_driver_t frontend_ctx_switch =
    NULL,                               /* detach_console */
    NULL,                               /* get_lakka_version */
    NULL,                               /* set_screen_brightness */
-   NULL,                               /* watch_path_for_changes */
-   NULL,                               /* check_for_path_changes */
    NULL,                               /* set_sustained_performance_mode */
    NULL,                               /* get_cpu_model_name */
    NULL,                               /* get_user_language */
    NULL,                               /* is_narrator_running */
    NULL,                               /* accessibility_speak */
    NULL,                               /* set_gamemode */
+   NULL, /* get_display_type */
    "switch",                           /* ident */
    NULL                                /* get_video_driver */
 };

@@ -25,18 +25,19 @@
 #include <boolean.h>
 #include <retro_common_api.h>
 
+#include "modeline/modeline_list.h"
 
 RETRO_BEGIN_DECLS
 
+/* State of the CRT consumer: the request last seen, the generator and
+ * the display server ops it applies through, and a drmModeModeInfo
+ * mirror the DRM context reads when KMS is the server. */
 typedef struct videocrt_switch
 {
    double p_clock;
+   video_modeline_gen_t *gen;
+   video_modeline_ops_t ops;
 
-   int center_adjust;
-   int porch_adjust;
-   int tmp_porch_adjust;
-   int tmp_center_adjust;
-   int rtn;
    unsigned ra_core_width;
    unsigned ra_core_height;
    unsigned ra_tmp_width;
@@ -52,11 +53,32 @@ typedef struct videocrt_switch
    float fly_aspect;
    float fb_ra_core_hz;
 
-   bool sr2_active;
+   int center_adjust;
+   int porch_adjust;
+   int vert_adjust;
+   int tmp_porch_adjust;
+   int tmp_center_adjust;
+   int tmp_vert_adjust;
+   int rtn;
+   int interlace;
+   int doublescan;
+   int hsync;
+   int vsync;
+
+   /* Part of drmModeModeInfo struct from xf86drmMode.h */
+   uint32_t clock;
+   uint32_t vrefresh;
+   uint16_t hdisplay, hsync_start, hsync_end, htotal, hskew;
+   uint16_t vdisplay, vsync_start, vsync_end, vtotal, vscan;
+   bool active;
+   bool ops_valid;
    bool menu_active;
    bool hh_core;
 
-
+   bool rotated;
+   bool tmp_rotated;
+   bool kms_ctx;
+   bool khr_ctx;
 } videocrt_switch_t;
 
 void crt_switch_res_core(
@@ -65,15 +87,24 @@ void crt_switch_res_core(
       unsigned width,
       unsigned height,
       float hz,
+      bool rotated,
       unsigned crt_mode,
       int crt_switch_center_adjust,
       int crt_switch_porch_adjust,
       int monitor_index,
       bool dynamic,
       int super_width,
-      bool hires_menu);
+      bool hires_menu,
+      unsigned video_aspect_ratio_idx,
+      int crt_switch_vert_adjust);
 
 void crt_destroy_modes(videocrt_switch_t *p_switch);
+
+/* Write an EDID block for the configured CRT preset (menu mode, or
+ * the ini set for mode 4) to <config>/edid/<preset>.bin; s receives
+ * the path. Generation only: installing the block on a connector is
+ * the user's step, and the log says how. */
+bool crt_switch_write_edid(char *s, size_t len);
 
 RETRO_END_DECLS
 

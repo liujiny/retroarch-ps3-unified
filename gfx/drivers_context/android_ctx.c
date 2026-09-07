@@ -53,6 +53,11 @@ static enum gfx_ctx_api android_api           = GFX_CTX_NONE;
 static bool g_es3                             = false;
 #endif
 
+/* FORWARD DECLARATION */
+bool android_display_get_metrics(void *data,
+      enum display_metric_types type, float *value);
+bool android_display_has_focus(void *data);
+
 static void android_gfx_ctx_destroy(void *data)
 {
    android_ctx_data_t *and         = (android_ctx_data_t*)data;
@@ -72,11 +77,11 @@ static void *android_gfx_ctx_init(void *video_driver)
 #ifdef HAVE_OPENGLES
    EGLint n, major, minor;
    EGLint format;
-#if 0
+#ifdef DEBUG
    struct retro_hw_render_callback *hwr = video_driver_get_hw_context();
-   bool debug = hwr->debug_context;
+   bool debug                           = hwr->debug_context;
 #endif
-   EGLint attribs[] = {
+   EGLint attribs[]                     = {
       EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
       EGL_SURFACE_TYPE, EGL_WINDOW_BIT,
       EGL_BLUE_SIZE, 8,
@@ -87,20 +92,31 @@ static void *android_gfx_ctx_init(void *video_driver)
       EGL_NONE
    };
 #endif
-   struct android_app *android_app = (struct android_app*)g_android;
-   android_ctx_data_t        *and  = (android_ctx_data_t*)
+   struct android_app *android_app      = (struct android_app*)g_android;
+   android_ctx_data_t        *and       = (android_ctx_data_t*)
       calloc(1, sizeof(*and));
 
-   if (!android_app || !and)
-      return false;
+   /* Separate the two checks so the combined bail doesn't leak
+    * 'and' when it succeeded but android_app was NULL.  In the
+    * pre-patch form both conditions shared one return without
+    * a free.  Also fixed the return value: the pre-patch
+    * 'return false' was 'return 0' which is NULL for a void*-
+    * returning function but sloppy; use NULL explicitly. */
+   if (!and)
+      return NULL;
+   if (!android_app)
+   {
+      free(and);
+      return NULL;
+   }
 
 #ifdef HAVE_OPENGLES
    if (g_es3)
-      attribs[1] = EGL_OPENGL_ES3_BIT_KHR;
+      attribs[1]                        = EGL_OPENGL_ES3_BIT_KHR;
 #endif
 
 #ifdef HAVE_EGL
-   RARCH_LOG("Android EGL: GLES version = %d.\n", g_es3 ? 3 : 2);
+   RARCH_LOG("[Android] EGL: GLES version = %d.\n", g_es3 ? 3 : 2);
 
    if (!egl_init_context(&and->egl, EGL_NONE, EGL_DEFAULT_DISPLAY,
             &major, &minor, &n, attribs, NULL))
@@ -108,7 +124,6 @@ static void *android_gfx_ctx_init(void *video_driver)
       egl_report_error();
       goto error;
    }
-
    if (!egl_get_native_visual_id(&and->egl, &format))
       goto error;
 #endif
@@ -135,9 +150,8 @@ error:
 static void android_gfx_ctx_get_video_size(void *data,
       unsigned *width, unsigned *height)
 {
-   android_ctx_data_t *and  = (android_ctx_data_t*)data;
-
 #ifdef HAVE_EGL
+   android_ctx_data_t *and  = (android_ctx_data_t*)data;
    egl_get_video_size(&and->egl, width, height);
 #endif
 }
@@ -157,7 +171,7 @@ static void android_gfx_ctx_check_window(void *data, bool *quit,
 
    if (new_width != *width || new_height != *height)
    {
-      RARCH_LOG("[Android]: Resizing (%u x %u) -> (%u x %u).\n",
+      RARCH_LOG("[Android] Resizing (%u x %u) -> (%u x %u).\n",
               *width, *height, new_width, new_height);
 
       *width  = new_width;
@@ -179,36 +193,24 @@ static bool android_gfx_ctx_set_video_mode(void *data,
 #if defined(HAVE_EGL)
    EGLint     context_attributes[] = {
       EGL_CONTEXT_CLIENT_VERSION, g_es3 ? 3 : 2,
-#if 0
+#ifdef DEBUG
       EGL_CONTEXT_FLAGS_KHR, debug ? EGL_CONTEXT_OPENGL_DEBUG_BIT_KHR : 0,
 #endif
       EGL_NONE
    };
-#endif
-#endif
 
-   switch (android_api)
+   if (android_api == GFX_CTX_OPENGL_ES_API)
    {
-      case GFX_CTX_OPENGL_API:
-         break;
-      case GFX_CTX_OPENGL_ES_API:
-#if defined(HAVE_OPENGLES) && defined(HAVE_EGL)
-         if (!egl_create_context(&and->egl, context_attributes))
-         {
-            egl_report_error();
-            return false;
-         }
-
-         if (!egl_create_surface(&and->egl, android_app->window))
-            return false;
-#endif
-         break;
-
-      case GFX_CTX_NONE:
-      default:
-         break;
+      if (!egl_create_context(&and->egl, context_attributes))
+      {
+         egl_report_error();
+         return false;
+      }
+      if (!egl_create_surface(&and->egl, android_app->window))
+         return false;
    }
-
+#endif
+#endif
    return true;
 }
 
@@ -236,7 +238,7 @@ static bool android_gfx_ctx_bind_api(void *data,
 #ifdef HAVE_OPENGLES
    version     = major * 100 + minor;
    if (version >= 300)
-      g_es3 = true;
+      g_es3    = true;
    if (api == GFX_CTX_OPENGL_ES_API)
       return true;
 #endif
@@ -244,86 +246,28 @@ static bool android_gfx_ctx_bind_api(void *data,
    return false;
 }
 
-static bool android_gfx_ctx_has_focus(void *data)
-{
-   bool                    focused = false;
-   struct android_app *android_app = (struct android_app*)g_android;
-   if (!android_app)
-      return true;
-
-   slock_lock(android_app->mutex);
-   focused = !android_app->unfocused;
-   slock_unlock(android_app->mutex);
-
-   return focused;
-}
-
 static bool android_gfx_ctx_suppress_screensaver(void *data, bool enable) { return false; }
-
-static bool android_gfx_ctx_get_metrics(void *data,
-	enum display_metric_types type, float *value)
-{
-   static int dpi = -1;
-
-   switch (type)
-   {
-      case DISPLAY_METRIC_MM_WIDTH:
-      case DISPLAY_METRIC_MM_HEIGHT:
-         return false;
-      case DISPLAY_METRIC_DPI:
-         if (dpi == -1)
-         {
-            char density[PROP_VALUE_MAX];
-            density[0] = '\0';
-
-            android_dpi_get_density(density, sizeof(density));
-            if (string_is_empty(density))
-               goto dpi_fallback;
-            dpi    = atoi(density);
-
-            if (dpi <= 0)
-               goto dpi_fallback;
-         }
-         *value = (float)dpi;
-         break;
-      case DISPLAY_METRIC_NONE:
-      default:
-         *value = 0;
-         return false;
-   }
-
-   return true;
-
-dpi_fallback:
-   /* add a fallback in case the device doesn't report DPI.
-    * Hopefully fixes issues with the moto G2. */
-   dpi    = 90;
-   *value = (float)dpi;
-   return true;
-}
 
 static void android_gfx_ctx_swap_buffers(void *data)
 {
-   android_ctx_data_t *and  = (android_ctx_data_t*)data;
-
 #ifdef HAVE_EGL
+   android_ctx_data_t *and  = (android_ctx_data_t*)data;
    egl_swap_buffers(&and->egl);
 #endif
 }
 
 static void android_gfx_ctx_set_swap_interval(void *data, int swap_interval)
 {
-   android_ctx_data_t *and  = (android_ctx_data_t*)data;
-
 #ifdef HAVE_EGL
+   android_ctx_data_t *and  = (android_ctx_data_t*)data;
    egl_set_swap_interval(&and->egl, swap_interval);
 #endif
 }
 
 static void android_gfx_ctx_bind_hw_render(void *data, bool enable)
 {
-   android_ctx_data_t *and  = (android_ctx_data_t*)data;
 #ifdef HAVE_EGL
+   android_ctx_data_t *and  = (android_ctx_data_t*)data;
    egl_bind_hw_render(&and->egl, enable);
 #endif
 }
@@ -341,6 +285,27 @@ static uint32_t android_gfx_ctx_get_flags(void *data)
 
 static void android_gfx_ctx_set_flags(void *data, uint32_t flags) { }
 
+static bool android_gfx_ctx_create_surface(void *data)
+{
+#ifdef HAVE_EGL
+   struct android_app *android_app = (struct android_app*)g_android;
+   android_ctx_data_t *and = (android_ctx_data_t*)data;
+   return egl_create_surface(&and->egl, android_app->window);
+#else
+   return false;
+#endif
+}
+
+static bool android_gfx_ctx_destroy_surface(void *data)
+{
+#ifdef HAVE_EGL
+   android_ctx_data_t *and = (android_ctx_data_t*)data;
+   return egl_destroy_surface(&and->egl);
+#else
+   return false;
+#endif
+}
+
 const gfx_ctx_driver_t gfx_ctx_android = {
    android_gfx_ctx_init,
    android_gfx_ctx_destroy,
@@ -353,12 +318,12 @@ const gfx_ctx_driver_t gfx_ctx_android = {
    NULL, /* get_video_output_size */
    NULL, /* get_video_output_prev */
    NULL, /* get_video_output_next */
-   android_gfx_ctx_get_metrics,
+   NULL, /* get_metrics - handled by display server */
    NULL,
    NULL, /* update_title */
    android_gfx_ctx_check_window,
    android_gfx_ctx_set_resize,
-   android_gfx_ctx_has_focus,
+   android_display_has_focus,
    android_gfx_ctx_suppress_screensaver,
    false, /* has_windowed */
    android_gfx_ctx_swap_buffers,
@@ -376,5 +341,7 @@ const gfx_ctx_driver_t gfx_ctx_android = {
    android_gfx_ctx_set_flags,
    android_gfx_ctx_bind_hw_render,
    NULL,
-   NULL
+   NULL,
+   android_gfx_ctx_create_surface,
+   android_gfx_ctx_destroy_surface
 };

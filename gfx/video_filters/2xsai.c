@@ -68,21 +68,18 @@ static void *twoxsai_generic_create(const struct softfilter_config *config,
       unsigned threads, softfilter_simd_mask_t simd, void *userdata)
 {
    struct filter_data *filt = (struct filter_data*)calloc(1, sizeof(*filt));
-
-   (void)simd;
-   (void)config;
-   (void)userdata;
    if (!filt)
       return NULL;
-   filt->workers = (struct softfilter_thread_data*)
-      calloc(threads, sizeof(struct softfilter_thread_data));
-   filt->threads = 1;
-   filt->in_fmt  = in_fmt;
-   if (!filt->workers)
+   if (!(filt->workers = (struct softfilter_thread_data*)
+      calloc(threads, sizeof(struct softfilter_thread_data))))
    {
       free(filt);
       return NULL;
    }
+   /* Apparently the code is not thread-safe,
+    * so force single threaded operation... */
+   filt->threads = 1;
+   filt->in_fmt  = in_fmt;
    return filt;
 }
 
@@ -90,7 +87,7 @@ static void twoxsai_generic_output(void *data,
       unsigned *out_width, unsigned *out_height,
       unsigned width, unsigned height)
 {
-   *out_width = width * TWOXSAI_SCALE;
+   *out_width  = width * TWOXSAI_SCALE;
    *out_height = height * TWOXSAI_SCALE;
 }
 
@@ -118,23 +115,27 @@ static void twoxsai_generic_destroy(void *data)
 
 #define twoxsai_result(A, B, C, D) (((A) != (C) || (A) != (D)) - ((B) != (C) || (B) != (D)));
 
-#define twoxsai_declare_variables(typename_t, in, nextline) \
+/* prevline/nextline/nextline2 are row offsets already clamped against
+ * the top and bottom of the frame, and xm1/xp1/xp2 are column offsets
+ * clamped against its left and right edge, so the 4x4 neighbourhood
+ * never reaches outside the source. */
+#define twoxsai_declare_variables(typename_t, in, prevline, nextline, nextline2, xm1, xp1, xp2) \
          typename_t product, product1, product2; \
-         typename_t colorI = *(in - nextline - 1); \
-         typename_t colorE = *(in - nextline + 0); \
-         typename_t colorF = *(in - nextline + 1); \
-         typename_t colorJ = *(in - nextline + 2); \
-         typename_t colorG = *(in - 1); \
-         typename_t colorA = *(in + 0); \
-         typename_t colorB = *(in + 1); \
-         typename_t colorK = *(in + 2); \
-         typename_t colorH = *(in + nextline - 1); \
-         typename_t colorC = *(in + nextline + 0); \
-         typename_t colorD = *(in + nextline + 1); \
-         typename_t colorL = *(in + nextline + 2); \
-         typename_t colorM = *(in + nextline + nextline - 1); \
-         typename_t colorN = *(in + nextline + nextline + 0); \
-         typename_t colorO = *(in + nextline + nextline + 1);
+         typename_t colorI = *(in - prevline + xm1); \
+         typename_t colorE = *(in - prevline); \
+         typename_t colorF = *(in - prevline + xp1); \
+         typename_t colorJ = *(in - prevline + xp2); \
+         typename_t colorG = *(in + xm1); \
+         typename_t colorA = *(in); \
+         typename_t colorB = *(in + xp1); \
+         typename_t colorK = *(in + xp2); \
+         typename_t colorH = *(in + nextline + xm1); \
+         typename_t colorC = *(in + nextline); \
+         typename_t colorD = *(in + nextline + xp1); \
+         typename_t colorL = *(in + nextline + xp2); \
+         typename_t colorM = *(in + nextline2 + xm1); \
+         typename_t colorN = *(in + nextline2); \
+         typename_t colorO = *(in + nextline2 + xp1);
 
 #ifndef twoxsai_function
 #define twoxsai_function(result_cb, interpolate_cb, interpolate2_cb) \
@@ -143,30 +144,22 @@ static void twoxsai_generic_destroy(void *data)
             if ((colorA == colorE && colorB == colorL) || (colorA == colorC && colorA == colorF && colorB != colorE && colorB == colorJ)) \
                product = colorA; \
             else \
-            { \
                product = interpolate_cb(colorA, colorB); \
-            } \
             if ((colorA == colorG && colorC == colorO) || (colorA == colorB && colorA == colorH && colorG != colorC && colorC == colorM)) \
                product1 = colorA; \
             else \
-            { \
                product1 = interpolate_cb(colorA, colorC); \
-            } \
             product2 = colorA; \
          } else if (colorB == colorC && colorA != colorD) \
          { \
             if ((colorB == colorF && colorA == colorH) || (colorB == colorE && colorB == colorD && colorA != colorF && colorA == colorI)) \
                product = colorB; \
             else \
-            { \
                product = interpolate_cb(colorA, colorB); \
-            } \
             if ((colorC == colorH && colorA == colorF) || (colorC == colorG && colorC == colorD && colorA != colorH && colorA == colorI)) \
                product1 = colorC; \
             else \
-            { \
                product1 = interpolate_cb(colorA, colorC); \
-            } \
             product2 = colorB; \
          } \
          else if (colorA == colorD && colorB == colorC) \
@@ -179,21 +172,19 @@ static void twoxsai_generic_destroy(void *data)
             } \
             else \
             { \
-               int r = 0; \
+               int r    = 0; \
                product1 = interpolate_cb(colorA, colorC); \
                product  = interpolate_cb(colorA, colorB); \
-               r += result_cb(colorA, colorB, colorG, colorE); \
-               r += result_cb(colorB, colorA, colorK, colorF); \
-               r += result_cb(colorB, colorA, colorH, colorN); \
-               r += result_cb(colorA, colorB, colorL, colorO); \
+               r       += result_cb(colorA, colorB, colorG, colorE); \
+               r       += result_cb(colorB, colorA, colorK, colorF); \
+               r       += result_cb(colorB, colorA, colorH, colorN); \
+               r       += result_cb(colorA, colorB, colorL, colorO); \
                if (r > 0) \
                   product2 = colorA; \
                else if (r < 0) \
                   product2 = colorB; \
                else \
-               { \
                   product2 = interpolate2_cb(colorA, colorB, colorC, colorD); \
-               } \
             } \
          } \
          else \
@@ -204,21 +195,17 @@ static void twoxsai_generic_destroy(void *data)
             else if (colorB == colorE && colorB == colorD && colorA != colorF && colorA == colorI) \
                product = colorB; \
             else \
-            { \
                product = interpolate_cb(colorA, colorB); \
-            } \
             if (colorA == colorB && colorA == colorH && colorG != colorC && colorC == colorM) \
                product1 = colorA; \
             else if (colorC == colorG && colorC == colorD && colorA != colorH && colorA == colorI) \
                product1 = colorC; \
             else \
-            { \
                product1 = interpolate_cb(colorA, colorC); \
-            } \
          } \
-         out[0] = colorA; \
-         out[1] = product; \
-         out[dst_stride] = product1; \
+         out[0]              = colorA; \
+         out[1]              = product; \
+         out[dst_stride]     = product1; \
          out[dst_stride + 1] = product2; \
          ++in; \
          out += 2
@@ -229,16 +216,29 @@ static void twoxsai_generic_xrgb8888(unsigned width, unsigned height,
       unsigned src_stride, uint32_t *dst, unsigned dst_stride)
 {
    unsigned finish;
-   unsigned nextline = (last) ? 0 : src_stride;
+   unsigned row = 0;
 
-   for (; height; height--)
+   for (; height; height--, row++)
    {
-      uint32_t *in  = (uint32_t*)src;
-      uint32_t *out = (uint32_t*)dst;
+      uint32_t *in            = (uint32_t*)src;
+      uint32_t *out           = (uint32_t*)dst;
+      /* Rows above are only unavailable on the frame's very first row;
+       * a worker that does not start at the top can always read back
+       * into the preceding slice. */
+      unsigned prevline   = (first == 0 && row == 0) ? 0 : src_stride;
+      unsigned nextline   = (last && height <= 1) ? 0 : src_stride;
+      unsigned nextline2  = (last && height <= 2) ? nextline : 2 * src_stride;
 
       for (finish = width; finish; finish -= 1)
       {
-         twoxsai_declare_variables(uint32_t, in, nextline);
+         /* finish counts down from width, so it doubles as the distance
+          * to the right edge. */
+         int xm1 = (finish < width) ? -1 : 0;
+         int xp1 = (finish > 1) ? 1 : 0;
+         int xp2 = (finish > 2) ? 2 : (int)finish - 1;
+
+         twoxsai_declare_variables(uint32_t, in, prevline, nextline, nextline2,
+               xm1, xp1, xp2);
 
          /*
           * Map of the pixels:           I|E F|J
@@ -261,16 +261,29 @@ static void twoxsai_generic_rgb565(unsigned width, unsigned height,
       unsigned src_stride, uint16_t *dst, unsigned dst_stride)
 {
    unsigned finish;
-   unsigned nextline = (last) ? 0 : src_stride;
+   unsigned row = 0;
 
-   for (; height; height--)
+   for (; height; height--, row++)
    {
-      uint16_t *in  = (uint16_t*)src;
-      uint16_t *out = (uint16_t*)dst;
+      uint16_t *in            = (uint16_t*)src;
+      uint16_t *out           = (uint16_t*)dst;
+      /* Rows above are only unavailable on the frame's very first row;
+       * a worker that does not start at the top can always read back
+       * into the preceding slice. */
+      unsigned prevline   = (first == 0 && row == 0) ? 0 : src_stride;
+      unsigned nextline   = (last && height <= 1) ? 0 : src_stride;
+      unsigned nextline2  = (last && height <= 2) ? nextline : 2 * src_stride;
 
       for (finish = width; finish; finish -= 1)
       {
-         twoxsai_declare_variables(uint16_t, in, nextline);
+         /* finish counts down from width, so it doubles as the distance
+          * to the right edge. */
+         int xm1 = (finish < width) ? -1 : 0;
+         int xp1 = (finish > 1) ? 1 : 0;
+         int xp2 = (finish > 2) ? 2 : (int)finish - 1;
+
+         twoxsai_declare_variables(uint16_t, in, prevline, nextline, nextline2,
+               xm1, xp1, xp2);
 
          /*
           * Map of the pixels:           I|E F|J
@@ -292,11 +305,10 @@ static void twoxsai_work_cb_rgb565(void *data, void *thread_data)
 {
    struct softfilter_thread_data *thr =
       (struct softfilter_thread_data*)thread_data;
-   uint16_t *input = (uint16_t*)thr->in_data;
-   uint16_t *output = (uint16_t*)thr->out_data;
-   unsigned width = thr->width;
-   unsigned height = thr->height;
-
+   uint16_t *input                    = (uint16_t*)thr->in_data;
+   uint16_t *output                   = (uint16_t*)thr->out_data;
+   unsigned width                     = thr->width;
+   unsigned height                    = thr->height;
    twoxsai_generic_rgb565(width, height,
          thr->first, thr->last, input,
          (unsigned)(thr->in_pitch / SOFTFILTER_BPP_RGB565),
@@ -308,11 +320,10 @@ static void twoxsai_work_cb_xrgb8888(void *data, void *thread_data)
 {
    struct softfilter_thread_data *thr =
       (struct softfilter_thread_data*)thread_data;
-   uint32_t *input = (uint32_t*)thr->in_data;
-   uint32_t *output = (uint32_t*)thr->out_data;
-   unsigned width = thr->width;
-   unsigned height = thr->height;
-
+   uint32_t *input                    = (uint32_t*)thr->in_data;
+   uint32_t *output                   = (uint32_t*)thr->out_data;
+   unsigned width                     = thr->width;
+   unsigned height                    = thr->height;
    twoxsai_generic_xrgb8888(width, height,
          thr->first, thr->last, input,
          (unsigned)(thr->in_pitch / SOFTFILTER_BPP_XRGB8888),
@@ -327,37 +338,34 @@ static void twoxsai_generic_packets(void *data,
       unsigned height, size_t input_stride)
 {
    unsigned i;
-   struct filter_data *filt = (struct filter_data*)data;
+   struct filter_data *filt  = (struct filter_data*)data;
 
    for (i = 0; i < filt->threads; i++)
    {
       struct softfilter_thread_data *thr =
          (struct softfilter_thread_data*)&filt->workers[i];
 
-      unsigned y_start = (height * i) / filt->threads;
-      unsigned y_end = (height * (i + 1)) / filt->threads;
-      thr->out_data = (uint8_t*)output + y_start *
+      unsigned y_start       = (height * i) / filt->threads;
+      unsigned y_end         = (height * (i + 1)) / filt->threads;
+
+      thr->out_data          = (uint8_t*)output + y_start *
          TWOXSAI_SCALE * output_stride;
-      thr->in_data = (const uint8_t*)input + y_start * input_stride;
-      thr->out_pitch = output_stride;
-      thr->in_pitch = input_stride;
-      thr->width = width;
-      thr->height = y_end - y_start;
+      thr->in_data           = (const uint8_t*)input + y_start * input_stride;
+      thr->out_pitch         = output_stride;
+      thr->in_pitch          = input_stride;
+      thr->width             = width;
+      thr->height            = y_end - y_start;
 
       /* Workers need to know if they can access pixels
        * outside their given buffer.
        */
-      thr->first = y_start;
-      thr->last = y_end == height;
+      thr->first             = y_start;
+      thr->last              = y_end == height;
 
       if (filt->in_fmt == SOFTFILTER_FMT_RGB565)
-         packets[i].work = twoxsai_work_cb_rgb565;
-#if 0
-      else if (filt->in_fmt == SOFTFILTER_FMT_RGB4444)
-         packets[i].work = twoxsai_work_cb_rgb4444;
-#endif
+         packets[i].work     = twoxsai_work_cb_rgb565;
       else if (filt->in_fmt == SOFTFILTER_FMT_XRGB8888)
-         packets[i].work = twoxsai_work_cb_xrgb8888;
+         packets[i].work     = twoxsai_work_cb_xrgb8888;
       packets[i].thread_data = thr;
    }
 }
@@ -380,7 +388,6 @@ static const struct softfilter_implementation twoxsai_generic = {
 const struct softfilter_implementation *softfilter_get_implementation(
       softfilter_simd_mask_t simd)
 {
-   (void)simd;
    return &twoxsai_generic;
 }
 

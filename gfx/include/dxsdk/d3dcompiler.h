@@ -1,3 +1,6 @@
+/* SAL compatibility shim for legacy MSVC and some MinGW-w64 */
+#include "dxsdk_sal_compat.h"
+
 //////////////////////////////////////////////////////////////////////////////
 //
 //  Copyright (c) Microsoft Corporation.  All rights reserved.
@@ -9,6 +12,10 @@
 
 #ifndef __D3DCOMPILER_H__
 #define __D3DCOMPILER_H__
+
+#if defined(__GNUC__)
+#pragma GCC system_header
+#endif
 
 /*#include <winapifamily.h>*/
 
@@ -321,11 +328,13 @@ D3DReflect(_In_reads_bytes_(SrcDataSize) LPCVOID pSrcData,
 // reflection APIs.
 //----------------------------------------------------------------------------
 
+#ifndef RARCH_INTERNAL
 HRESULT WINAPI
 D3DReflectLibrary(__in_bcount(SrcDataSize) LPCVOID pSrcData,
                   __in SIZE_T SrcDataSize,
 	              __in REFIID riid,
                   __out LPVOID * ppReflector);
+#endif
 
 //----------------------------------------------------------------------------
 // D3DDisassemble:
@@ -369,8 +378,10 @@ D3DDisassembleRegion(_In_reads_bytes_(SrcDataSize) LPCVOID pSrcData,
 //----------------------------------------------------------------------------
 // Shader linking and Function Linking Graph (FLG) APIs
 //----------------------------------------------------------------------------
+#ifndef RARCH_INTERNAL
 HRESULT WINAPI
 D3DCreateLinker(__out interface ID3D11Linker ** ppLinker);
+#endif
 
 HRESULT WINAPI
 D3DLoadModule(_In_ LPCVOID pSrcData,

@@ -1,0 +1,613 @@
+/*  RetroArch - A frontend for libretro.
+ *  Copyright (C) 2010-2014 - Hans-Kristian Arntzen
+ *  Copyright (C) 2011-2021 - Daniel De Matteis
+ *
+ *  RetroArch is free software: you can redistribute it and/or modify it under the terms
+ *  of the GNU General Public License as published by the Free Software Found-
+ *  ation, either version 3 of the License, or (at your option) any later version.
+ *
+ *  RetroArch is distributed in the hope that it will be useful, but WITHOUT ANY WARRANTY;
+ *  without even the implied warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR
+ *  PURPOSE.  See the GNU General Public License for more details.
+ *
+ *  You should have received a copy of the GNU General Public License along with RetroArch.
+ *  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#ifndef __RUNLOOP_H
+#define __RUNLOOP_H
+
+#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+
+#include <boolean.h>
+#include <retro_inline.h>
+#include <retro_common_api.h>
+#include <libretro.h>
+#include <dynamic/dylib.h>
+#include <queues/message_queue.h>
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#ifdef HAVE_THREADS
+#include <rthreads/rthreads.h>
+#endif
+
+#include "dynamic.h"
+#include "configuration.h"
+#include "core_option_manager.h"
+#include "performance_counters.h"
+#include "state_manager.h"
+#ifdef HAVE_RUNAHEAD
+#include "runahead.h"
+#endif
+#include "tasks/tasks_internal.h"
+
+/* Arbitrary twenty subsystems limit */
+#define SUBSYSTEM_MAX_SUBSYSTEMS 20
+
+/* Arbitrary 10 roms for each subsystem limit */
+#define SUBSYSTEM_MAX_SUBSYSTEM_ROMS 10
+
+#ifdef HAVE_THREADS
+#define RUNLOOP_MSG_QUEUE_LOCK(runloop_st) slock_lock((runloop_st)->msg_queue_lock)
+#define RUNLOOP_MSG_QUEUE_UNLOCK(runloop_st) slock_unlock((runloop_st)->msg_queue_lock)
+#else
+#define RUNLOOP_MSG_QUEUE_LOCK(runloop_st) (void)(runloop_st)
+#define RUNLOOP_MSG_QUEUE_UNLOCK(runloop_st) (void)(runloop_st)
+#endif
+
+#ifdef HAVE_BSV_MOVIE
+#define BSV_MOVIE_IS_EOF() || (((input_st->bsv_movie_state.flags & BSV_FLAG_MOVIE_END) && (input_st->bsv_movie_state.flags & BSV_FLAG_MOVIE_EOF_EXIT)))
+#else
+#define BSV_MOVIE_IS_EOF()
+#endif
+
+/* Time to exit out of the main loop?
+ * Reasons for exiting:
+ * a) Shutdown environment callback was invoked.
+ * b) Quit key was pressed.
+ * c) Frame count exceeds or equals maximum amount of frames to run.
+ * d) Video driver no longer alive.
+ * e) End of BSV movie and BSV EOF exit is true. (TODO/FIXME - explain better)
+ */
+#define RUNLOOP_TIME_TO_EXIT(quit_key_pressed) ((runloop_state.flags & RUNLOOP_FLAG_SHUTDOWN_INITIATED) || quit_key_pressed || !is_alive BSV_MOVIE_IS_EOF() || ((runloop_state.max_frames != 0) && (frame_count >= runloop_state.max_frames)) || runloop_exec)
+
+enum runloop_state_enum
+{
+   RUNLOOP_STATE_ITERATE = 0,
+   RUNLOOP_STATE_POLLED_AND_SLEEP,
+   /* A one-shot menu action was performed and the next iteration should
+    * start clean. Not idle: returns to the caller immediately, without
+    * the idle sleep POLLED_AND_SLEEP takes. */
+   RUNLOOP_STATE_POLLED_AND_CONTINUE,
+   RUNLOOP_STATE_PAUSE,
+   RUNLOOP_STATE_MENU,
+   RUNLOOP_STATE_QUIT
+};
+
+enum poll_type_override_t
+{
+   POLL_TYPE_OVERRIDE_DONTCARE = 0,
+   POLL_TYPE_OVERRIDE_EARLY,
+   POLL_TYPE_OVERRIDE_NORMAL,
+   POLL_TYPE_OVERRIDE_LATE
+};
+
+enum runloop_flags
+{
+   RUNLOOP_FLAG_MAX_FRAMES_SCREENSHOT             = (1 << 0),
+   RUNLOOP_FLAG_HAS_SET_CORE                      = (1 << 1),
+   RUNLOOP_FLAG_CORE_SET_SHARED_CONTEXT           = (1 << 2),
+   RUNLOOP_FLAG_IGNORE_ENVIRONMENT_CB             = (1 << 3),
+   RUNLOOP_FLAG_IS_SRAM_LOAD_DISABLED             = (1 << 4),
+   RUNLOOP_FLAG_IS_SRAM_SAVE_DISABLED             = (1 << 5),
+   RUNLOOP_FLAG_USE_SRAM                          = (1 << 6),
+   RUNLOOP_FLAG_PATCH_BLOCKED                     = (1 << 7),
+   RUNLOOP_FLAG_REQUEST_SPECIAL_SAVESTATE         = (1 << 8),
+   RUNLOOP_FLAG_OVERRIDES_ACTIVE                  = (1 << 9),
+   RUNLOOP_FLAG_GAME_OPTIONS_ACTIVE               = (1 << 10),
+   RUNLOOP_FLAG_FOLDER_OPTIONS_ACTIVE             = (1 << 11),
+   RUNLOOP_FLAG_REMAPS_CORE_ACTIVE                = (1 << 12),
+   RUNLOOP_FLAG_REMAPS_GAME_ACTIVE                = (1 << 13),
+   RUNLOOP_FLAG_REMAPS_CONTENT_DIR_ACTIVE         = (1 << 14),
+   RUNLOOP_FLAG_SHUTDOWN_INITIATED                = (1 << 15),
+   RUNLOOP_FLAG_CORE_SHUTDOWN_INITIATED           = (1 << 16),
+   RUNLOOP_FLAG_CORE_RUNNING                      = (1 << 17),
+   RUNLOOP_FLAG_AUTOSAVE                          = (1 << 18),
+   RUNLOOP_FLAG_HAS_VARIABLE_UPDATE               = (1 << 19),
+   RUNLOOP_FLAG_INPUT_IS_DIRTY                    = (1 << 20),
+   RUNLOOP_FLAG_RUNAHEAD_SAVE_STATE_SIZE_KNOWN    = (1 << 21),
+   RUNLOOP_FLAG_RUNAHEAD_AVAILABLE                = (1 << 22),
+   RUNLOOP_FLAG_RUNAHEAD_SECONDARY_CORE_AVAILABLE = (1 << 23),
+   RUNLOOP_FLAG_RUNAHEAD_FORCE_INPUT_DIRTY        = (1 << 24),
+   RUNLOOP_FLAG_SLOWMOTION                        = (1 << 25),
+   RUNLOOP_FLAG_FASTMOTION                        = (1 << 26),
+   RUNLOOP_FLAG_PAUSED                            = (1 << 27),
+   RUNLOOP_FLAG_IDLE                              = (1 << 28),
+   RUNLOOP_FLAG_FOCUSED                           = (1 << 29),
+   RUNLOOP_FLAG_FORCE_NONBLOCK                    = (1 << 30)
+   /* (1 << 31) was RUNLOOP_FLAG_IS_INITED.  Moved out of this word into
+    * an atomic behind the runloop_is_inited_* accessors: it is the only
+    * bit here read off the main thread (the AppIntents entity query runs
+    * on a GCD worker), and the main thread's non-atomic read-modify-
+    * writes of this word would race that read.  Bit left reserved. */
+};
+
+/* Whether retroarch_main_init() has completed.  Written on the main
+ * thread, readable from any thread. */
+void runloop_is_inited_set(void);
+void runloop_is_inited_clear(void);
+bool runloop_is_inited(void);
+
+/* Contains the current retro_fastforwarding_override
+ * parameters along with any pending updates triggered
+ * by RETRO_ENVIRONMENT_SET_FASTFORWARDING_OVERRIDE */
+typedef struct fastmotion_overrides
+{
+   struct retro_fastforwarding_override current;
+   struct retro_fastforwarding_override next;
+   bool pending;
+} fastmotion_overrides_t;
+
+typedef struct
+{
+   unsigned priority;
+   float duration;
+   char str[128];
+   bool set;
+} runloop_core_status_msg_t;
+
+/* Contains all callbacks associated with
+ * core options.
+ * > At present there is only a single
+ *   callback, 'update_display' - but we
+ *   may wish to add more in the future
+ *   (e.g. for directly informing a core of
+ *   core option value changes, or getting/
+ *   setting extended/non-standard option
+ *   value data types) */
+typedef struct core_options_callbacks
+{
+   retro_core_options_update_display_callback_t update_display;
+} core_options_callbacks_t;
+
+struct runloop
+{
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+   rarch_timer_t shader_delay_timer;            /* int64_t alignment */
+#endif
+   retro_time_t core_runtime_last;
+   retro_time_t core_runtime_usec;
+   retro_time_t core_run_time;
+   retro_time_t frame_limit_minimum_time;
+   retro_time_t frame_limit_last_time;
+   /* When the previous iteration reached the pacing block, and the
+    * smoothed interval between iterations. The pace bits say who
+    * claims to be holding the loop; this says how fast it is actually
+    * going, which is the other half of the same question - a source
+    * that claims the loop while the loop runs at three times the
+    * content rate is not holding anything. */
+   retro_time_t pace_iter_last;
+   retro_time_t pace_period_usec;
+   unsigned     pace;                           /* enum runloop_pace_source bits */
+   retro_usec_t frame_time_last;                /* int64_t alignment */
+
+   /* Per-frame scalar state. Kept adjacent to the timing block above so the
+    * whole set the frame loop evaluates every iteration lands in the first
+    * cache lines of the struct, rather than ~348 lines further in behind the
+    * content/system/subsystem blocks. Declaration order only; every access is
+    * by member name. */
+   fastmotion_overrides_t fastmotion_override;  /* float alignment */
+
+   enum rarch_core_type current_core_type;
+   enum rarch_core_type explicit_current_core_type;
+   enum poll_type_override_t core_poll_type_override;
+#if defined(HAVE_RUNAHEAD)
+   enum rarch_core_type last_core_type;
+#endif
+
+   uint32_t flags;
+   int16_t entry_state_slot;
+   uint8_t pending_disk_control_insert;
+   int8_t run_frames_and_pause;
+
+   struct retro_core_t        current_core;     /* uint64_t alignment */
+#if defined(HAVE_RUNAHEAD)
+   uint64_t runahead_last_frame_count;          /* uint64_t alignment */
+#if defined(HAVE_DYNAMIC) || defined(HAVE_DYLIB)
+   struct retro_core_t secondary_core;          /* uint64_t alignment */
+#endif
+   retro_ctx_load_content_info_t *load_content_info;
+#if defined(HAVE_DYNAMIC) || defined(HAVE_DYLIB)
+   char    *secondary_library_path;
+#endif
+   /* Embedded directly: was previously a my_list wrapper holding a
+    * single retro_ctx_serialize_info_t* in data[0].  The list machinery
+    * was overkill for one pointer — two extra mallocs at init (the
+    * my_list struct + its 16-slot data array), one extra indirection
+    * per access, and a constructor/destructor function-pointer pair
+    * for what amounts to alloc/free of a data buffer. */
+   retro_ctx_serialize_info_t runahead_savestate_info;
+   my_list *input_state_list;
+   preempt_t *preempt_data;
+#endif
+
+#ifdef HAVE_REWIND
+   struct state_manager_rewind_state rewind_st;
+#endif
+   struct retro_perf_counter *perf_counters_libretro[MAX_COUNTERS];
+   bool    *load_no_content_hook;
+   struct string_list *subsystem_fullpaths;
+   struct retro_subsystem_info subsystem_data[SUBSYSTEM_MAX_SUBSYSTEMS];
+   struct retro_callbacks retro_ctx;                     /* ptr alignment */
+   msg_queue_t msg_queue;                                /* ptr alignment */
+   retro_input_poll_t input_poll_callback_original;      /* ptr alignment */
+   retro_input_state_t input_state_callback_original;    /* ptr alignment */
+#ifdef HAVE_RUNAHEAD
+   function_t retro_reset_callback_original;             /* ptr alignment */
+   function_t original_retro_deinit;                     /* ptr alignment */
+   function_t original_retro_unload;                     /* ptr alignment */
+   runahead_load_state_function
+      retro_unserialize_callback_original;               /* ptr alignment */
+#if defined(HAVE_DYNAMIC) || defined(HAVE_DYLIB)
+   struct retro_callbacks secondary_callbacks;           /* ptr alignment */
+#endif
+#endif
+#ifdef HAVE_THREADS
+   slock_t *msg_queue_lock;
+#endif
+
+   content_state_t            content_st;                /* ptr alignment */
+   struct retro_subsystem_rom_info
+      subsystem_data_roms[SUBSYSTEM_MAX_SUBSYSTEMS]
+      [SUBSYSTEM_MAX_SUBSYSTEM_ROMS];             /* ptr alignment */
+   core_option_manager_t *core_options;
+   core_options_callbacks_t core_options_callback;/* ptr alignment */
+
+   retro_keyboard_event_t key_event;             /* ptr alignment */
+   retro_keyboard_event_t frontend_key_event;    /* ptr alignment */
+
+   rarch_system_info_t system;                   /* ptr alignment */
+   struct retro_frame_time_callback frame_time;  /* ptr alignment */
+   struct retro_audio_buffer_status_callback audio_buffer_status; /* ptr alignment */
+#ifdef HAVE_DYNAMIC
+   dylib_t lib_handle;                                   /* ptr alignment */
+#endif
+#if defined(HAVE_RUNAHEAD)
+#if defined(HAVE_DYNAMIC) || defined(HAVE_DYLIB)
+   dylib_t secondary_lib_handle;                         /* ptr alignment */
+#endif
+   size_t runahead_save_state_size;
+#endif
+   size_t msg_queue_size;
+
+#if defined(HAVE_RUNAHEAD)
+#if defined(HAVE_DYNAMIC) || defined(HAVE_DYLIB)
+   int port_map[MAX_USERS];
+#endif
+#endif
+
+   runloop_core_status_msg_t core_status_msg;
+
+   unsigned msg_queue_delay;
+   unsigned pending_windowed_scale;
+   unsigned max_frames;
+   unsigned audio_latency;
+   unsigned fastforward_after_frames;
+   unsigned perf_ptr_libretro;
+   unsigned subsystem_current_count;
+   unsigned video_swap_interval_auto;
+   retro_bits_t has_set_libretro_device;        /* uint32_t alignment */
+
+   char runtime_content_path_basename[PATH_MAX_LENGTH];
+#ifdef HAVE_SCREENSHOTS
+   char max_frames_screenshot_path[PATH_MAX_LENGTH];
+#endif
+#if defined(HAVE_CG) || defined(HAVE_GLSL) || defined(HAVE_SLANG) || defined(HAVE_HLSL)
+   char runtime_shader_preset_path[PATH_MAX_LENGTH];
+#endif
+   char runtime_content_path[PATH_MAX_LENGTH];
+   char runtime_core_path[PATH_MAX_LENGTH];
+   char savefile_dir[DIR_MAX_LENGTH];
+   char savestate_dir[DIR_MAX_LENGTH];
+   char current_library_name[NAME_MAX_LENGTH];
+   char current_valid_extensions[256];
+   char subsystem_path[256];
+   char current_library_version[64];
+
+   struct
+   {
+      /* TODO/FIXME: Same type for all */
+      char *remapfile;
+      char label    [PATH_MAX_LENGTH];
+      char savefile [PATH_MAX_LENGTH];
+      char savestate[PATH_MAX_LENGTH];
+      char replay   [PATH_MAX_LENGTH];
+      char cheatfile[PATH_MAX_LENGTH];
+      char ups      [PATH_MAX_LENGTH];
+      char bps      [PATH_MAX_LENGTH];
+      char ips      [PATH_MAX_LENGTH];
+      char xdelta   [PATH_MAX_LENGTH];
+   } name;
+
+   bool perfcnt_enable;
+   bool paused_hotkey;
+
+   /* True from the moment closing content starts tearing the core
+    * down until the teardown is finished.
+    *
+    * Set and cleared around the existing synchronous teardown, so at
+    * present nothing can observe it as true: the main thread is
+    * inside that teardown for its whole duration and no frame runs.
+    * It is introduced separately, and deliberately inert, because
+    * the work that makes it observable - returning to the frame loop
+    * instead of blocking - is a lifecycle change, and this is the
+    * piece everything else will key off.
+    *
+    * A plain bool rather than a RUNLOOP_FLAG bit: bits 0-30 of that
+    * word are taken and bit 31 was deliberately vacated to avoid a
+    * cross-thread race, so reusing it would undo that reasoning for
+    * no gain. This is main-thread only. */
+   bool content_closing;
+   /* An external clock is calling runloop_iterate(); see
+    * RUNLOOP_PACE_EXTERNAL. Main-thread only, same reasoning. */
+   bool pace_external;
+};
+
+/* Frame pacing sources.
+ *
+ * The loop is held to a rate by whichever of these block on a given
+ * frame. They are not exclusive and they are not prioritised: VSync
+ * blocks in the video driver's present, audio backpressure blocks in
+ * audio_driver_write(), Scanline Sync waits in
+ * video_driver_scanline_after_frame(), and the frame-limit timer sleeps
+ * at the end of runloop_iterate(). Any combination can be live on the
+ * same frame, which is why VSync together with audio_sync stutters -
+ * two hardware clocks holding the same loop - and why the comment at
+ * the RUNLOOP_STATE_MENU throttle special-cases audio backpressure
+ * against the timer.
+ *
+ * runloop_state_t::pace records the composition for the current
+ * frame, computed once in runloop_pace_compute() from the same
+ * conditions each mechanism already tests. It does not yet choose
+ * between them: this is the composition made explicit, so that a
+ * priority can be decided in one place later rather than by adding a
+ * fourth special case in a third file. A bitmask rather than an enum
+ * for exactly that reason - a single value would assert a choice the
+ * loop does not currently make. */
+enum runloop_pace_source
+{
+   RUNLOOP_PACE_NONE     = 0,
+   RUNLOOP_PACE_VSYNC    = (1 << 0), /* display: present blocks          */
+   RUNLOOP_PACE_AUDIO    = (1 << 1), /* audio crystal: write blocks      */
+   RUNLOOP_PACE_SCANLINE = (1 << 2), /* display: vblank-locked wait      */
+   RUNLOOP_PACE_TIMER    = (1 << 3), /* CPU counter: frame-limit sleep   */
+   RUNLOOP_PACE_NOWINDOW = (1 << 4), /* nothing to present to: wait      */
+   /* The host is calling runloop_iterate() at the content rate from
+    * somewhere it must return quickly to - a Win32 modal size/move
+    * loop, for one. The frame-limit sleep, frame delay, and the
+    * no-window wait yield to that clock rather than stack on it. Set
+    * from runloop_state_t::pace_external. */
+   RUNLOOP_PACE_EXTERNAL = (1 << 5)
+};
+
+/* The three pacing decisions the runloop makes every iteration, here
+ * rather than in runloop.c so samples/runloop/pacing can run the
+ * shipping versions instead of a copy that drifts from them. Each is
+ * pure: no state, no clock, nothing to mock. */
+
+/* One frame of the content's own time, in microseconds. Bounded either
+ * way: a core is free to report a nonsense rate, and neither a busy
+ * loop nor a ten-second stall is a reasonable reading of one frame.
+ * A rate of zero means "unknown", which is taken as 60 Hz. */
+static INLINE retro_time_t runloop_content_frame_time_us(float core_hz)
+{
+   retro_time_t period = (core_hz > 0.0f)
+         ? (retro_time_t)(1000000.0f / core_hz) : 16667;
+   if (period < 1000)
+      return 1000;
+   if (period > 100000)
+      return 100000;
+   return period;
+}
+
+/* Whether the frame limiter should hold the loop at 1.0x because
+ * nothing else is: an empty pace record means no vsync, no audio, no
+ * scanline lock, and no fast-forward limit to fall back on. Never
+ * under fast-forward, where running unthrottled is the point. */
+static INLINE bool runloop_pace_gap_engages(unsigned pace,
+      bool nonblocking, bool fastmotion)
+{
+   return (pace == RUNLOOP_PACE_NONE) && !nonblocking && !fastmotion;
+}
+
+/* Whether an interval between iterations is worth averaging into the
+ * measured loop rate. Anything past a quarter second is a stall - a
+ * state load, a shader rebuild - not pacing, and one of them drags an
+ * eight-sample average far enough to misreport for several frames.
+ * Nothing that genuinely holds the loop runs slower than 4 Hz. */
+static INLINE bool runloop_pace_sample_usable(retro_time_t delta_us)
+{
+   return delta_us > 0 && delta_us < 250000;
+}
+
+typedef struct runloop runloop_state_t;
+
+RETRO_BEGIN_DECLS
+
+void runloop_path_fill_names(void);
+
+/**
+ * runloop_environment_cb:
+ * @cmd                          : Identifier of command.
+ * @data                         : Pointer to data.
+ *
+ * Environment callback function implementation.
+ *
+ * Returns: true (1) if environment callback command could
+ * be performed, otherwise false (0).
+ **/
+bool runloop_environment_cb(unsigned cmd, void *data);
+
+void runloop_msg_queue_push(const char *msg, size_t len,
+      unsigned prio, unsigned duration,
+      bool flush,
+      char *title,
+      enum message_queue_icon icon,
+      enum message_queue_category category);
+
+void runloop_set_current_core_type(
+      enum rarch_core_type type, bool explicitly_set);
+
+/**
+ * runloop_iterate:
+ *
+ * Run Libretro core in RetroArch for one frame.
+ *
+ * Returns: 0 on successful run,
+ * Returns 1 if we have to wait until button input in order
+ * to wake up the loop.
+ * Returns -1 if we forcibly quit out of the
+ * RetroArch iteration loop.
+ **/
+int runloop_iterate(void);
+
+void runloop_system_info_free(void);
+
+/**
+ * libretro_get_system_info:
+ * @path                         : Path to libretro library.
+ * @info                         : Pointer to system info information.
+ * @load_no_content              : If true, core should be able to auto-start
+ *                                 without any content loaded.
+ *
+ * Gets system info from an arbitrary lib.
+ * The struct returned must be freed as strings are allocated dynamically.
+ *
+ * Returns: true (1) if successful, otherwise false (0).
+ **/
+bool libretro_get_system_info(
+      const char *path,
+      struct retro_system_info *info,
+      bool *load_no_content);
+
+void runloop_performance_counter_register(
+      struct retro_perf_counter *perf);
+
+void runloop_runtime_log_deinit(
+      runloop_state_t *runloop_st,
+      bool content_runtime_log,
+      bool content_runtime_log_aggregate,
+      const char *dir_runtime_log,
+      const char *dir_playlist);
+
+void runloop_event_deinit_core(void);
+
+bool runloop_event_init_core(
+      settings_t *settings,
+      void *input_data,
+      enum rarch_core_type type,
+      const char *old_savefile_dir,
+      const char *old_savestate_dir
+      );
+
+void runloop_pause_checks(void);
+
+void runloop_set_frame_limit(
+      const struct retro_system_av_info *av_info,
+      float fastforward_ratio);
+
+float runloop_get_fastforward_ratio(
+      settings_t *settings,
+      struct retro_fastforwarding_override *fastmotion_override);
+
+void runloop_set_video_swap_interval(
+      settings_t *settings);
+
+unsigned runloop_get_video_swap_interval(
+      unsigned swap_interval_config);
+
+void runloop_task_msg_queue_push(
+      retro_task_t *task, const char *msg,
+      unsigned prio, unsigned duration,
+      bool flush);
+
+/* Status of the asynchronous secondary-core binary copy. Only
+ * RUNAHEAD_COPY_READY means the secondary instance exists and its
+ * function pointers are safe to call; PENDING means the copy task
+ * is still running (callers should skip quietly and retry later,
+ * NOT tear the secondary state down). */
+enum runahead_copy_status
+{
+   RUNAHEAD_COPY_UNAVAILABLE = 0,
+   RUNAHEAD_COPY_PENDING,
+   RUNAHEAD_COPY_READY
+};
+
+enum runahead_copy_status secondary_core_ensure_exists(void *data,
+      settings_t *settings);
+
+void runloop_log_counters(
+      struct retro_perf_counter **counters, unsigned num);
+
+void runloop_msg_queue_deinit(void);
+
+void runloop_msg_queue_init(void);
+
+void runloop_path_set_basename(const char *path);
+
+void runloop_path_set_names(void);
+
+uint32_t runloop_get_flags(void);
+
+bool runloop_get_entry_state_path(char *path, size_t len, int slot);
+
+bool runloop_get_current_savestate_path(char *path, size_t len);
+
+bool runloop_get_savestate_path(char *path, size_t len, int slot);
+
+bool runloop_get_replay_path(char *path, size_t len, int slot);
+
+void runloop_state_free(runloop_state_t *runloop_st);
+
+void runloop_path_set_redirect(settings_t *settings, const char *a, const char *b);
+
+void runloop_path_set_special(char **argv, unsigned num_content);
+
+void runloop_path_deinit_subsystem(void);
+
+/**
+ * init_libretro_symbols:
+ * @type                        : Type of core to be loaded.
+ *                                If CORE_TYPE_DUMMY, will
+ *                                load dummy symbols.
+ *
+ * Setup libretro callback symbols.
+ *
+ * @return true on success, or false if symbols could not be loaded.
+ **/
+bool runloop_init_libretro_symbols(
+      void *data,
+      enum rarch_core_type type,
+      struct retro_core_t *current_core,
+      const char *lib_path,
+      void *_lib_handle_p);
+
+runloop_state_t *runloop_state_get_ptr(void);
+
+/**
+ * runloop_is_content_closing:
+ *
+ * True while content is being closed, i.e. while the core is being
+ * torn down.  Currently only ever true inside the synchronous
+ * teardown, where nothing else runs to ask.
+ */
+bool runloop_is_content_closing(void);
+
+RETRO_END_DECLS
+
+#endif

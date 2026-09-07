@@ -17,7 +17,7 @@
 #define __EGL_COMMON_H
 
 #ifdef HAVE_GBM
-/* presense or absense of this include makes egl.h change NativeWindowType between gbm_device* and _XDisplay* */
+/* presence or absence of this include makes egl.h change NativeWindowType between gbm_device* and _XDisplay* */
 #include <gbm.h>
 #endif
 #include <EGL/egl.h>
@@ -74,7 +74,7 @@ extern bool g_egl_inited;
 extern unsigned g_egl_major;
 extern unsigned g_egl_minor;
 
-void egl_report_error(void);
+void egl_destroy_gl_dll(void);
 
 void egl_destroy(egl_ctx_data_t *egl);
 
@@ -118,10 +118,14 @@ bool egl_create_context(egl_ctx_data_t *egl, const EGLint *egl_attribs);
 
 bool egl_create_surface(egl_ctx_data_t *egl, void *native_window);
 
+bool egl_destroy_surface(egl_ctx_data_t *egl);
+
 bool egl_get_native_visual_id(egl_ctx_data_t *egl, EGLint *value);
 
 bool egl_get_config_attrib(EGLDisplay dpy, EGLConfig config,
       EGLint attribute, EGLint *value);
+
+void egl_report_error(void);
 
 bool egl_has_config(egl_ctx_data_t *egl);
 

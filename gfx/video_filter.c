@@ -16,6 +16,7 @@
 
 #include <stdlib.h>
 
+#include <compat/strl.h>
 #include <file/file_path.h>
 #include <file/config_file_userdata.h>
 #include <lists/dir_list.h>
@@ -135,43 +136,38 @@ static bool create_softfilter_graph(rarch_softfilter_t *filt,
       softfilter_simd_mask_t cpu_features,
       unsigned threads)
 {
-   unsigned input_fmts, input_fmt, output_fmts, i = 0;
+   unsigned input_fmts, input_fmt, output_fmts;
    struct config_file_userdata userdata;
    char key[64], name[64];
-
-   (void)i;
-
-   key[0] = name[0] = '\0';
-
-   snprintf(key, sizeof(key), "filter");
+   name[0] = '\0';
+   strlcpy_lit(key, "filter", sizeof(key));
 
    if (!config_get_array(filt->conf, key, name, sizeof(name)))
    {
-      RARCH_ERR("Could not find 'filter' array in config.\n");
+      RARCH_ERR("[SoftFilter] Could not find \"filter\" array in config.\n");
       return false;
    }
 
    if (filt->num_plugs == 0)
    {
-      RARCH_ERR("No filter plugs found. Exiting...\n");
+      RARCH_ERR("[SoftFilter] No filter plugs found. Exiting...\n");
       return false;
    }
 
-   filt->impl = softfilter_find_implementation(filt, name);
-   if (!filt->impl)
+   if (!(filt->impl = softfilter_find_implementation(filt, name)))
    {
-      RARCH_ERR("Could not find implementation.\n");
+      RARCH_ERR("[SoftFilter] Could not find implementation.\n");
       return false;
    }
 
-   userdata.conf = filt->conf;
+   userdata.conf      = filt->conf;
    /* Index-specific configs take priority over ident-specific. */
    userdata.prefix[0] = key;
    userdata.prefix[1] = filt->impl->short_ident;
 
    /* Simple assumptions. */
-   filt->pix_fmt = in_pixel_format;
-   input_fmts = filt->impl->query_input_formats();
+   filt->pix_fmt      = in_pixel_format;
+   input_fmts         = filt->impl->query_input_formats();
 
    switch (in_pixel_format)
    {
@@ -187,7 +183,7 @@ static bool create_softfilter_graph(rarch_softfilter_t *filt,
 
    if (!(input_fmt & input_fmts))
    {
-      RARCH_ERR("Softfilter does not support input format.\n");
+      RARCH_ERR("[SoftFilter] Unsupported input format.\n");
       return false;
    }
 
@@ -201,7 +197,7 @@ static bool create_softfilter_graph(rarch_softfilter_t *filt,
       filt->out_pix_fmt = RETRO_PIXEL_FORMAT_RGB565;
    else
    {
-      RARCH_ERR("Did not find suitable output format for softfilter.\n");
+      RARCH_ERR("[SoftFilter] Did not find suitable output format.\n");
       return false;
    }
 
@@ -215,34 +211,34 @@ static bool create_softfilter_graph(rarch_softfilter_t *filt,
          &userdata);
    if (!filt->impl_data)
    {
-      RARCH_ERR("Failed to create softfilter state.\n");
+      RARCH_ERR("[SoftFilter] Failed to create softfilter state.\n");
       return false;
    }
 
    threads = filt->impl->query_num_threads(filt->impl_data);
    if (!threads)
    {
-      RARCH_ERR("Invalid number of threads.\n");
+      RARCH_ERR("[SoftFilter] Invalid number of threads.\n");
       return false;
    }
 
    filt->threads = threads;
-   RARCH_LOG("Using %u threads for softfilter.\n", threads);
+   RARCH_LOG("[SoftFilter] Using %u threads for softfilter.\n", threads);
 
    filt->packets = (struct softfilter_work_packet*)
       calloc(threads, sizeof(*filt->packets));
    if (!filt->packets)
    {
-      RARCH_ERR("Failed to allocate softfilter packets.\n");
+      RARCH_ERR("[SoftFilter] Failed to allocate softfilter packets.\n");
       return false;
    }
 
 #ifdef HAVE_THREADS
    if (filt->threads > 1)
    {
-      filt->thread_data = (struct filter_thread_data*)
-         calloc(threads, sizeof(*filt->thread_data));
-      if (!filt->thread_data)
+      unsigned i;
+      if (!(filt->thread_data = (struct filter_thread_data*)
+         calloc(threads, sizeof(*filt->thread_data))))
          return false;
 
       for (i = 0; i < threads; i++)
@@ -291,8 +287,11 @@ extern const struct softfilter_implementation *gameboy4x_get_implementation(soft
 extern const struct softfilter_implementation *dot_matrix_3x_get_implementation(softfilter_simd_mask_t simd);
 extern const struct softfilter_implementation *dot_matrix_4x_get_implementation(softfilter_simd_mask_t simd);
 extern const struct softfilter_implementation *upscale_1_5x_get_implementation(softfilter_simd_mask_t simd);
+extern const struct softfilter_implementation *upscale_1_66x_fast_get_implementation(softfilter_simd_mask_t simd);
 extern const struct softfilter_implementation *upscale_256x_320x240_get_implementation(softfilter_simd_mask_t simd);
 extern const struct softfilter_implementation *picoscale_256x_320x240_get_implementation(softfilter_simd_mask_t simd);
+extern const struct softfilter_implementation *upscale_240x160_320x240_get_implementation(softfilter_simd_mask_t simd);
+extern const struct softfilter_implementation *upscale_mix_240x160_320x240_get_implementation(softfilter_simd_mask_t simd);
 
 static const softfilter_get_implementation_t soft_plugs_builtin[] = {
    blargg_ntsc_snes_get_implementation,
@@ -317,8 +316,11 @@ static const softfilter_get_implementation_t soft_plugs_builtin[] = {
    dot_matrix_3x_get_implementation,
    dot_matrix_4x_get_implementation,
    upscale_1_5x_get_implementation,
+   upscale_1_66x_fast_get_implementation,
    upscale_256x_320x240_get_implementation,
    picoscale_256x_320x240_get_implementation,
+   upscale_240x160_320x240_get_implementation,
+   upscale_mix_240x160_320x240_get_implementation,
 };
 
 static bool append_softfilter_plugs(rarch_softfilter_t *filt,
@@ -327,12 +329,8 @@ static bool append_softfilter_plugs(rarch_softfilter_t *filt,
    unsigned i;
    softfilter_simd_mask_t mask = (softfilter_simd_mask_t)cpu_features_get();
 
-   (void)list;
-
-   filt->plugs = (struct rarch_soft_plug*)
-      calloc(ARRAY_SIZE(soft_plugs_builtin), sizeof(*filt->plugs));
-
-   if (!filt->plugs)
+   if (!(filt->plugs = (struct rarch_soft_plug*)
+      calloc(ARRAY_SIZE(soft_plugs_builtin), sizeof(*filt->plugs))))
       return false;
 
    filt->num_plugs = ARRAY_SIZE(soft_plugs_builtin);
@@ -358,7 +356,7 @@ static bool append_softfilter_plugs(rarch_softfilter_t *filt,
       softfilter_get_implementation_t cb;
       const struct softfilter_implementation *impl = NULL;
       struct rarch_soft_plug *new_plugs            = NULL;
-      dylib_t lib                                  = 
+      dylib_t lib                                  =
          dylib_load(list->elems[i].data);
 
       if (!lib)
@@ -394,7 +392,7 @@ static bool append_softfilter_plugs(rarch_softfilter_t *filt,
          return false;
       }
 
-      RARCH_LOG("[SoftFilter]: Found plug: %s (%s).\n",
+      RARCH_LOG("[SoftFilter] Found plug: %s (%s).\n",
             impl->ident, impl->short_ident);
 
       filt->plugs                       = new_plugs;
@@ -423,8 +421,8 @@ rarch_softfilter_t *rarch_softfilter_new(const char *filter_config,
 {
    softfilter_simd_mask_t cpu_features = (softfilter_simd_mask_t)cpu_features_get();
 #ifdef HAVE_DYLIB
-   char basedir[PATH_MAX_LENGTH];
-   char ext_name[PATH_MAX_LENGTH];
+   char basedir[DIR_MAX_LENGTH];
+   char ext_name[16];
 #endif
    struct string_list *plugs     = NULL;
    rarch_softfilter_t *filt      = (rarch_softfilter_t*)
@@ -434,7 +432,7 @@ rarch_softfilter_t *rarch_softfilter_new(const char *filter_config,
 
    if (!(filt->conf = config_file_new_from_path_to_string(filter_config)))
    {
-      RARCH_ERR("[SoftFilter]: Did not find config: %s\n", filter_config);
+      RARCH_ERR("[SoftFilter] Did not find config: \"%s\".\n", filter_config);
       goto error;
    }
 
@@ -444,17 +442,15 @@ rarch_softfilter_t *rarch_softfilter_new(const char *filter_config,
    if (!frontend_driver_get_core_extension(ext_name, sizeof(ext_name)))
          goto error;
 
-   plugs = dir_list_new(basedir, ext_name, false, false, false, false);
-
-   if (!plugs)
+   if (!(plugs = dir_list_new(basedir, ext_name, false, false, false, false)))
    {
-      RARCH_ERR("[SoftFilter]: Could not build up string list...\n");
+      RARCH_ERR("[SoftFilter] Could not build up string list...\n");
       goto error;
    }
 #endif
    if (!append_softfilter_plugs(filt, plugs))
    {
-      RARCH_ERR("[SoftFitler]: Failed to append softfilter plugins...\n");
+      RARCH_ERR("[SoftFilter] Failed to append softfilter plugins...\n");
       goto error;
    }
 
@@ -465,7 +461,7 @@ rarch_softfilter_t *rarch_softfilter_new(const char *filter_config,
    if (!create_softfilter_graph(filt, in_pixel_format,
             max_width, max_height, cpu_features, threads))
    {
-      RARCH_ERR("[SoftFitler]: Failed to create softfilter graph...\n");
+      RARCH_ERR("[SoftFilter] Failed to create softfilter graph...\n");
       goto error;
    }
 
@@ -505,8 +501,6 @@ void rarch_softfilter_free(rarch_softfilter_t *filt)
    {
       for (i = 0; i < filt->threads; i++)
       {
-         if (!&filt->thread_data[i])
-            continue;
          if (!filt->thread_data[i].thread)
             continue;
          slock_lock(filt->thread_data[i].lock);
@@ -569,9 +563,6 @@ void rarch_softfilter_process(rarch_softfilter_t *filt,
       /* Fire off workers */
       for (i = 0; i < filt->threads; i++)
       {
-#if 0
-         RARCH_LOG("Firing off filter thread %u ...\n", i);
-#endif
          filt->thread_data[i].packet = &filt->packets[i];
          slock_lock(filt->thread_data[i].lock);
          filt->thread_data[i].done = false;
@@ -582,9 +573,6 @@ void rarch_softfilter_process(rarch_softfilter_t *filt,
       /* Wait for workers */
       for (i = 0; i < filt->threads; i++)
       {
-#if 0
-         RARCH_LOG("Waiting for filter thread %u ...\n", i);
-#endif
          slock_lock(filt->thread_data[i].lock);
          while (!filt->thread_data[i].done)
             scond_wait(filt->thread_data[i].cond, filt->thread_data[i].lock);

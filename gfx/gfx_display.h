@@ -25,15 +25,13 @@
 
 #include <boolean.h>
 #include <retro_common_api.h>
-#include <string/stdstring.h>
 #include <formats/image.h>
 #include <gfx/math/matrix_4x4.h>
 
 #include "../retroarch.h"
-#include "../file_path_special.h"
 #include "../gfx/font_driver.h"
 
-RETRO_BEGIN_DECLS
+#define GFX_SHADOW_ALPHA 1.00f
 
 /* Number of pixels corner-to-corner on a 1080p
  * display:
@@ -41,11 +39,11 @@ RETRO_BEGIN_DECLS
  * Note: This is a double, so no suffix */
 #define DIAGONAL_PIXELS_1080P 2202.90717008229831581901
 
-#define COLOR_TEXT_ALPHA(color, alpha) (color & 0xFFFFFF00) | alpha
+#define COLOR_TEXT_ALPHA(color, alpha) ((color & 0xFFFFFF00) | (alpha))
 
-#define HEX_R(hex) ((hex >> 16) & 0xFF) * (1.0f / 255.0f)
-#define HEX_G(hex) ((hex >> 8 ) & 0xFF) * (1.0f / 255.0f)
-#define HEX_B(hex) ((hex >> 0 ) & 0xFF) * (1.0f / 255.0f)
+#define HEX_R(hex) (((hex) >> 16) & 0xFF) * (1.0f / 255.0f)
+#define HEX_G(hex) (((hex) >> 8 ) & 0xFF) * (1.0f / 255.0f)
+#define HEX_B(hex) (((hex) >> 0 ) & 0xFF) * (1.0f / 255.0f)
 
 #define COLOR_HEX_TO_FLOAT(hex, alpha) { \
    HEX_R(hex), HEX_G(hex), HEX_B(hex), alpha, \
@@ -64,7 +62,17 @@ RETRO_BEGIN_DECLS
  * so that we don't have to render the display graphics per-frame
  * unless a change has happened.
  * */
-#define GFX_DISPLAY_GET_UPDATE_PENDING(p_anim, p_disp) (ANIM_IS_ACTIVE(p_anim) || p_disp->framebuf_dirty)
+#define GFX_DISPLAY_GET_UPDATE_PENDING(p_anim, p_disp) (ANIM_IS_ACTIVE(p_anim) || (p_disp->flags & GFX_DISP_FLAG_FB_DIRTY))
+
+
+RETRO_BEGIN_DECLS
+
+enum gfx_display_flags
+{
+   GFX_DISP_FLAG_HAS_WINDOWED     = (1 << 0),
+   GFX_DISP_FLAG_MSG_FORCE        = (1 << 1),
+   GFX_DISP_FLAG_FB_DIRTY         = (1 << 2)
+};
 
 enum menu_driver_id_type
 {
@@ -72,17 +80,7 @@ enum menu_driver_id_type
    MENU_DRIVER_ID_RGUI,
    MENU_DRIVER_ID_OZONE,
    MENU_DRIVER_ID_GLUI,
-   MENU_DRIVER_ID_XMB,
-   MENU_DRIVER_ID_XUI,
-   MENU_DRIVER_ID_STRIPES
-};
-
-
-enum gfx_display_prim_type
-{
-   GFX_DISPLAY_PRIM_NONE = 0,
-   GFX_DISPLAY_PRIM_TRIANGLESTRIP,
-   GFX_DISPLAY_PRIM_TRIANGLES
+   MENU_DRIVER_ID_XMB
 };
 
 enum gfx_display_driver_type
@@ -94,21 +92,20 @@ enum gfx_display_driver_type
    GFX_VIDEO_DRIVER_VULKAN,
    GFX_VIDEO_DRIVER_METAL,
    GFX_VIDEO_DRIVER_DIRECT3D8,
-   GFX_VIDEO_DRIVER_DIRECT3D9,
+   GFX_VIDEO_DRIVER_DIRECT3D9_CG,
+   GFX_VIDEO_DRIVER_DIRECT3D9_HLSL,
    GFX_VIDEO_DRIVER_DIRECT3D10,
    GFX_VIDEO_DRIVER_DIRECT3D11,
    GFX_VIDEO_DRIVER_DIRECT3D12,
-   GFX_VIDEO_DRIVER_VITA2D,
+   GFX_VIDEO_DRIVER_GXM,
    GFX_VIDEO_DRIVER_CTR,
    GFX_VIDEO_DRIVER_WIIU,
    GFX_VIDEO_DRIVER_GDI,
-   GFX_VIDEO_DRIVER_SWITCH
+   GFX_VIDEO_DRIVER_SWITCH,
+   GFX_VIDEO_DRIVER_RSX,
+   GFX_VIDEO_DRIVER_SDL2,
+   GFX_VIDEO_DRIVER_SDL3
 };
-
-typedef struct gfx_display_frame_info
-{
-   bool shadows_enable;
-} gfx_display_frame_info_t;
 
 typedef struct gfx_display_ctx_draw gfx_display_ctx_draw_t;
 
@@ -133,11 +130,7 @@ typedef struct gfx_display_ctx_driver
    const float *(*get_default_vertices)(void);
    /* Get the default texture coordinates matrix */
    const float *(*get_default_tex_coords)(void);
-   /* Initialize the first compatible font driver for this menu driver. */
-   bool (*font_init_first)(
-         void **font_handle, void *video_data,
-         const char *font_path, float font_size,
-         bool is_threaded);
+   const struct font_renderer  *font_backend;
    enum gfx_display_driver_type type;
    const char *ident;
    bool handles_transform;
@@ -167,19 +160,8 @@ struct gfx_display_ctx_draw
    float y;
    float rotation;
    float scale_factor;
-   enum gfx_display_prim_type prim_type;
    bool pipeline_active;
 };
-
-typedef struct gfx_display_ctx_rotate_draw
-{
-   math_matrix_4x4 *matrix;
-   float rotation;
-   float scale_x;
-   float scale_y;
-   float scale_z;
-   bool scale_enable;
-} gfx_display_ctx_rotate_draw_t;
 
 typedef struct gfx_display_ctx_coord_draw
 {
@@ -188,16 +170,12 @@ typedef struct gfx_display_ctx_coord_draw
 
 typedef struct gfx_display_ctx_datetime
 {
-   char *s;
-   size_t len;
    unsigned time_mode;
    unsigned date_separator;
 } gfx_display_ctx_datetime_t;
 
 typedef struct gfx_display_ctx_powerstate
 {
-   char *s;
-   size_t len;
    unsigned percent;
    bool battery_enabled;
    bool charging;
@@ -218,9 +196,7 @@ struct gfx_display
 
    enum menu_driver_id_type menu_driver_id;
 
-   bool has_windowed;
-   bool msg_force;
-   bool framebuf_dirty;
+   uint8_t flags;
 };
 
 void gfx_display_free(void);
@@ -243,11 +219,17 @@ void gfx_display_draw_text(
       float scale_factor, bool shadows_enable, float shadow_offset,
       bool draw_outside);
 
-font_data_t *gfx_display_font(
-      gfx_display_t *p_disp,
-      enum application_special_type type,
-      float font_size,
-      bool video_is_threaded);
+/* As gfx_display_draw_text, but drives glyph colour at full float precision
+ * (color_rgba = 4 floats R,G,B,A in 0..1) for deep-colour framebuffers.
+ * Backends that do not implement the high-precision path fall back to the
+ * 8-bit 'color', so supply an equivalent packed value there. */
+void gfx_display_draw_text_hp(
+      const font_data_t *font, const char *text,
+      float x, float y, int width, int height,
+      uint32_t color, const float *color_rgba,
+      enum text_alignment text_align,
+      float scale_factor, bool shadows_enable, float shadow_offset,
+      bool draw_outside);
 
 void gfx_display_scissor_begin(
       gfx_display_t *p_disp,
@@ -255,14 +237,6 @@ void gfx_display_scissor_begin(
       unsigned video_width,
       unsigned video_height,
       int x, int y, unsigned width, unsigned height);
-
-void gfx_display_font_free(font_data_t *font);
-
-void gfx_display_set_width(unsigned width);
-void gfx_display_get_fb_size(unsigned *fb_width, unsigned *fb_height,
-      size_t *fb_pitch);
-void gfx_display_set_height(unsigned height);
-void gfx_display_set_framebuffer_pitch(size_t pitch);
 
 bool gfx_display_init_first_driver(gfx_display_t *p_disp,
       bool video_is_threaded);
@@ -279,9 +253,13 @@ void gfx_display_draw_keyboard(
       char *grid[], unsigned id,
       unsigned text_color);
 
+/* Note: coords must outlive the call — its address is stored in
+ * draw->coords and read by the caller's subsequent dispctx->draw().
+ * Callers should declare coords as a stack local alongside draw. */
 void gfx_display_draw_bg(
       gfx_display_t *p_disp,
       gfx_display_ctx_draw_t *draw,
+      struct video_coords *coords,
       void *userdata,
       bool add_opacity, float opacity_override);
 
@@ -307,25 +285,64 @@ void gfx_display_draw_texture_slice(
       math_matrix_4x4 *mymat);
 
 void gfx_display_rotate_z(gfx_display_t *p_disp,
-      gfx_display_ctx_rotate_draw_t *draw, void *data);
+      math_matrix_4x4 *matrix, float cosine, float sine, void *data);
 
 font_data_t *gfx_display_font_file(gfx_display_t *p_disp,
       char* fontpath, float font_size, bool is_threaded);
 
 bool gfx_display_reset_textures_list(
-      const char *texture_path, const char *iconpath,
+      const char *texture_path,
+      const char *iconpath,
+      uintptr_t *item,
+      enum texture_filter_type filter_type,
+      unsigned *width,
+      unsigned *height);
+
+/* Returns the texture filter type used when uploading menu/UI
+ * images (icons, thumbnails, wallpapers).  Mip-mapped filtering
+ * keeps images smooth when drawn below their native size at the
+ * cost of extra video memory; plain linear filtering is cheaper
+ * but aliases under heavy minification.  Controlled by the
+ * 'menu_texture_mipmapping' setting. */
+enum texture_filter_type gfx_display_texture_filter(void);
+
+bool gfx_display_reset_icon_texture(
+      const char *texture_path,
       uintptr_t *item, enum texture_filter_type filter_type,
       unsigned *width, unsigned *height);
+
+/* Platform-adaptive icon/texture loading.
+ *
+ * On platforms where async task-based image loading is detrimental
+ * to performance (e.g. Android with SAF I/O overhead), falls back
+ * to synchronous loading identical to the pre-async behavior.
+ *
+ * All menu drivers and gfx_widgets should call this instead of
+ * task_push_icon_load() directly so that adding a new platform
+ * to the synchronous path requires changing only one place.
+ *
+ * |generation| / |generation_ptr| are only used on the async path
+ * to guard against stale callbacks; on the synchronous path they
+ * are ignored (the load completes before the function returns). */
+bool gfx_display_load_icon(
+      const char *fullpath,
+      bool supports_rgba,
+      uintptr_t *target_texture,
+      uint64_t generation,
+      uint64_t *generation_ptr);
+
+bool gfx_display_reset_textures_list_buffer(
+        uintptr_t *item,
+        enum texture_filter_type filter_type,
+        void* buffer,
+        unsigned buffer_len,
+        enum image_type_enum image_type,
+        unsigned *width,
+        unsigned *height);
 
 /* Returns the OSK key at a given position */
 int gfx_display_osk_ptr_at_pos(void *data, int x, int y,
       unsigned width, unsigned height);
-
-float gfx_display_get_adjusted_scale(
-      gfx_display_t *p_disp,
-      float base_scale, float scale_factor, unsigned width);
-
-float gfx_display_get_dpi_scale_internal(unsigned width, unsigned height);
 
 float gfx_display_get_dpi_scale(
       gfx_display_t *p_disp,
@@ -338,8 +355,6 @@ void gfx_display_deinit_white_texture(void);
 
 void gfx_display_init_white_texture(void);
 
-bool gfx_display_driver_exists(const char *s);
-
 bool gfx_display_init_first_driver(gfx_display_t *p_disp,
       bool video_is_threaded);
 
@@ -349,15 +364,19 @@ extern gfx_display_ctx_driver_t gfx_display_ctx_gl1;
 extern gfx_display_ctx_driver_t gfx_display_ctx_vulkan;
 extern gfx_display_ctx_driver_t gfx_display_ctx_metal;
 extern gfx_display_ctx_driver_t gfx_display_ctx_d3d8;
-extern gfx_display_ctx_driver_t gfx_display_ctx_d3d9;
+extern gfx_display_ctx_driver_t gfx_display_ctx_d3d9_cg;
+extern gfx_display_ctx_driver_t gfx_display_ctx_d3d9_hlsl;
 extern gfx_display_ctx_driver_t gfx_display_ctx_d3d10;
 extern gfx_display_ctx_driver_t gfx_display_ctx_d3d11;
 extern gfx_display_ctx_driver_t gfx_display_ctx_d3d12;
-extern gfx_display_ctx_driver_t gfx_display_ctx_vita2d;
+extern gfx_display_ctx_driver_t gfx_display_ctx_gxm;
 extern gfx_display_ctx_driver_t gfx_display_ctx_ctr;
 extern gfx_display_ctx_driver_t gfx_display_ctx_wiiu;
 extern gfx_display_ctx_driver_t gfx_display_ctx_gdi;
 extern gfx_display_ctx_driver_t gfx_display_ctx_switch;
+extern gfx_display_ctx_driver_t gfx_display_ctx_rsx;
+extern gfx_display_ctx_driver_t gfx_display_ctx_sdl2;
+extern gfx_display_ctx_driver_t gfx_display_ctx_sdl3;
 
 RETRO_END_DECLS
 

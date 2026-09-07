@@ -14,11 +14,12 @@
  *  You should have received a copy of the GNU General Public License along with RetroArch.
  *  If not, see <http://www.gnu.org/licenses/>.
  */
+#include <compat/strl.h>
+#include <string/stdstring.h>
 
 #include "../gfx_widgets.h"
 #include "../gfx_animation.h"
 #include "../gfx_display.h"
-#include "../../retroarch.h"
 
 /* Widget state */
 
@@ -35,7 +36,7 @@ struct gfx_widget_progress_message_state
 
    unsigned priority;
 
-   gfx_timer_t timer;      /* float alignment */
+   float timer;      /* float alignment */
    float alpha;
    float widget_x;
    float widget_y;
@@ -126,6 +127,7 @@ void gfx_widget_set_progress_message(
       const char *message, unsigned duration,
       unsigned priority, int8_t progress)
 {
+   size_t _len;
    gfx_timer_ctx_entry_t timer;
    dispgfx_widget_t *p_dispwidget             = dispwidget_get_ptr();
    gfx_widget_progress_message_state_t *state = &p_w_progress_message_st;
@@ -134,7 +136,7 @@ void gfx_widget_set_progress_message(
    uintptr_t timer_tag                        = (uintptr_t)&state->timer;
 
    /* Ensure we have a valid message string */
-   if (string_is_empty(message))
+   if (!message || !*message)
       return;
 
    /* If widget is currently active, ignore new
@@ -143,15 +145,14 @@ void gfx_widget_set_progress_message(
       return;
 
    /* Cache message parameters */
-   strlcpy(state->message, message, sizeof(state->message));
+   _len              = strlcpy(state->message, message, sizeof(state->message));
    state->priority   = priority;
    state->progress   = progress;
 
    /* Cache text width */
    state->text_width = font_driver_get_message_width(
          font_regular->font,
-         state->message,
-         (unsigned)strlen(state->message),
+         state->message, _len,
          1.0f);
 
    /* Kill any existing timer/animation */
@@ -335,6 +336,12 @@ static void gfx_widget_progress_message_free(void)
 
 /* Widget definition */
 
+static bool gfx_widget_progress_message_visible(void)
+{
+   gfx_widget_progress_message_state_t *state = &p_w_progress_message_st;
+   return state->active;
+}
+
 const gfx_widget_t gfx_widget_progress_message = {
    NULL, /* init */
    gfx_widget_progress_message_free,
@@ -342,5 +349,6 @@ const gfx_widget_t gfx_widget_progress_message = {
    NULL, /* context_destroy */
    gfx_widget_progress_message_layout,
    NULL, /* iterate */
-   gfx_widget_progress_message_frame
+   gfx_widget_progress_message_frame,
+   gfx_widget_progress_message_visible
 };

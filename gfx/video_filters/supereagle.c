@@ -69,26 +69,22 @@ static void *supereagle_generic_create(const struct softfilter_config *config,
       unsigned threads, softfilter_simd_mask_t simd, void *userdata)
 {
    struct filter_data *filt = (struct filter_data*)calloc(1, sizeof(*filt));
-   (void)simd;
-   (void)config;
-   (void)userdata;
    if (!filt)
       return NULL;
-   filt->workers = (struct softfilter_thread_data*)calloc(threads, sizeof(struct softfilter_thread_data));
-   filt->threads = 1;
-   filt->in_fmt  = in_fmt;
-   if (!filt->workers)
+   if (!(filt->workers = (struct softfilter_thread_data*)calloc(threads, sizeof(struct softfilter_thread_data))))
    {
       free(filt);
       return NULL;
    }
+   filt->threads = 1;
+   filt->in_fmt  = in_fmt;
    return filt;
 }
 
 static void supereagle_generic_output(void *data, unsigned *out_width, unsigned *out_height,
       unsigned width, unsigned height)
 {
-   *out_width = width * SUPEREAGLE_SCALE;
+   *out_width  = width * SUPEREAGLE_SCALE;
    *out_height = height * SUPEREAGLE_SCALE;
 }
 
@@ -113,20 +109,24 @@ static void supereagle_generic_destroy(void *data)
 
 #define supereagle_result(A, B, C, D) (((A) != (C) || (A) != (D)) - ((B) != (C) || (B) != (D)));
 
-#define supereagle_declare_variables(typename_t, in, nextline) \
+/* prevline/nextline/nextline2 are row offsets already clamped against
+ * the top and bottom of the frame, and xm1/xp1/xp2 are column offsets
+ * clamped against its left and right edge, so the sampled
+ * neighbourhood never reaches outside the source. */
+#define supereagle_declare_variables(typename_t, in, prevline, nextline, nextline2, xm1, xp1, xp2) \
          typename_t product1a, product1b, product2a, product2b; \
-         const typename_t colorB1 = *(in - nextline + 0); \
-         const typename_t colorB2 = *(in - nextline + 1); \
-         const typename_t color4  = *(in - 1); \
-         const typename_t color5  = *(in + 0); \
-         const typename_t color6  = *(in + 1); \
-         const typename_t colorS2 = *(in + 2); \
-         const typename_t color1  = *(in + nextline - 1); \
-         const typename_t color2  = *(in + nextline + 0); \
-         const typename_t color3  = *(in + nextline + 1); \
-         const typename_t colorS1 = *(in + nextline + 2); \
-         const typename_t colorA1 = *(in + nextline + nextline + 0); \
-         const typename_t colorA2 = *(in + nextline + nextline + 1)
+         const typename_t colorB1 = *(in - prevline); \
+         const typename_t colorB2 = *(in - prevline + xp1); \
+         const typename_t color4  = *(in + xm1); \
+         const typename_t color5  = *(in); \
+         const typename_t color6  = *(in + xp1); \
+         const typename_t colorS2 = *(in + xp2); \
+         const typename_t color1  = *(in + nextline + xm1); \
+         const typename_t color2  = *(in + nextline); \
+         const typename_t color3  = *(in + nextline + xp1); \
+         const typename_t colorS1 = *(in + nextline + xp2); \
+         const typename_t colorA1 = *(in + nextline2); \
+         const typename_t colorA2 = *(in + nextline2 + xp1)
 
 #ifndef supereagle_function
 #define supereagle_function(result_cb, interpolate_cb, interpolate2_cb) \
@@ -219,17 +219,29 @@ static void supereagle_generic_xrgb8888(unsigned width, unsigned height,
       unsigned src_stride, uint32_t *dst, unsigned dst_stride)
 {
    unsigned finish;
-   unsigned nextline = (last) ? 0 : src_stride;
+   unsigned row = 0;
 
-   for (; height; height--)
+   for (; height; height--, row++)
    {
-      uint32_t *in  = (uint32_t*)src;
-      uint32_t *out = (uint32_t*)dst;
+      uint32_t *in             = (uint32_t*)src;
+      uint32_t *out            = (uint32_t*)dst;
+      /* Rows above are only unavailable on the frame's very first row;
+       * a worker that does not start at the top can always read back
+       * into the preceding slice. */
+      unsigned prevline  = (first == 0 && row == 0) ? 0 : src_stride;
+      unsigned nextline  = (last && height <= 1) ? 0 : src_stride;
+      unsigned nextline2 = (last && height <= 2) ? nextline : 2 * src_stride;
 
       for (finish = width; finish; finish -= 1)
       {
-         supereagle_declare_variables(uint32_t, in, nextline);
+         /* finish counts down from width, so it doubles as the distance
+          * to the right edge. */
+         int xm1 = (finish < width) ? -1 : 0;
+         int xp1 = (finish > 1) ? 1 : 0;
+         int xp2 = (finish > 2) ? 2 : (int)finish - 1;
 
+         supereagle_declare_variables(uint32_t, in, prevline, nextline, nextline2,
+               xm1, xp1, xp2);
          supereagle_function(supereagle_result, supereagle_interpolate_xrgb8888, supereagle_interpolate2_xrgb8888);
       }
 
@@ -243,17 +255,29 @@ static void supereagle_generic_rgb565(unsigned width, unsigned height,
       unsigned src_stride, uint16_t *dst, unsigned dst_stride)
 {
    unsigned finish;
-   unsigned nextline = (last) ? 0 : src_stride;
+   unsigned row = 0;
 
-   for (; height; height--)
+   for (; height; height--, row++)
    {
-      uint16_t *in  = (uint16_t*)src;
-      uint16_t *out = (uint16_t*)dst;
+      uint16_t *in             = (uint16_t*)src;
+      uint16_t *out            = (uint16_t*)dst;
+      /* Rows above are only unavailable on the frame's very first row;
+       * a worker that does not start at the top can always read back
+       * into the preceding slice. */
+      unsigned prevline  = (first == 0 && row == 0) ? 0 : src_stride;
+      unsigned nextline  = (last && height <= 1) ? 0 : src_stride;
+      unsigned nextline2 = (last && height <= 2) ? nextline : 2 * src_stride;
 
       for (finish = width; finish; finish -= 1)
       {
-         supereagle_declare_variables(uint16_t, in, nextline);
+         /* finish counts down from width, so it doubles as the distance
+          * to the right edge. */
+         int xm1 = (finish < width) ? -1 : 0;
+         int xp1 = (finish > 1) ? 1 : 0;
+         int xp2 = (finish > 2) ? 2 : (int)finish - 1;
 
+         supereagle_declare_variables(uint16_t, in, prevline, nextline, nextline2,
+               xm1, xp1, xp2);
          supereagle_function(supereagle_result, supereagle_interpolate_rgb565, supereagle_interpolate2_rgb565);
       }
 
@@ -265,31 +289,31 @@ static void supereagle_generic_rgb565(unsigned width, unsigned height,
 static void supereagle_work_cb_rgb565(void *data, void *thread_data)
 {
    struct softfilter_thread_data *thr = (struct softfilter_thread_data*)thread_data;
-   uint16_t *input = (uint16_t*)thr->in_data;
+   uint16_t *input  = (uint16_t*)thr->in_data;
    uint16_t *output = (uint16_t*)thr->out_data;
-   unsigned width = thr->width;
-   unsigned height = thr->height;
+   unsigned width   = thr->width;
+   unsigned height  = thr->height;
 
    supereagle_generic_rgb565(width, height,
          thr->first, thr->last, input,
-            (unsigned)(thr->in_pitch / SOFTFILTER_BPP_RGB565),
-            output,
-            (unsigned)(thr->out_pitch / SOFTFILTER_BPP_RGB565));
+         (unsigned)(thr->in_pitch / SOFTFILTER_BPP_RGB565),
+         output,
+         (unsigned)(thr->out_pitch / SOFTFILTER_BPP_RGB565));
 }
 
 static void supereagle_work_cb_xrgb8888(void *data, void *thread_data)
 {
    struct softfilter_thread_data *thr = (struct softfilter_thread_data*)thread_data;
-   uint32_t *input = (uint32_t*)thr->in_data;
+   uint32_t *input  = (uint32_t*)thr->in_data;
    uint32_t *output = (uint32_t*)thr->out_data;
-   unsigned width = thr->width;
-   unsigned height = thr->height;
+   unsigned width   = thr->width;
+   unsigned height  = thr->height;
 
    supereagle_generic_xrgb8888(width, height,
          thr->first, thr->last, input,
-        (unsigned)(thr->in_pitch / SOFTFILTER_BPP_XRGB8888),
-        output,
-        (unsigned)(thr->out_pitch / SOFTFILTER_BPP_XRGB8888));
+         (unsigned)(thr->in_pitch / SOFTFILTER_BPP_XRGB8888),
+         output,
+         (unsigned)(thr->out_pitch / SOFTFILTER_BPP_XRGB8888));
 }
 
 static void supereagle_generic_packets(void *data,
@@ -304,23 +328,23 @@ static void supereagle_generic_packets(void *data,
    {
       struct softfilter_thread_data *thr = (struct softfilter_thread_data*)&filt->workers[i];
 
-      unsigned y_start = (height * i) / filt->threads;
-      unsigned y_end = (height * (i + 1)) / filt->threads;
-      thr->out_data = (uint8_t*)output + y_start * SUPEREAGLE_SCALE * output_stride;
-      thr->in_data = (const uint8_t*)input + y_start * input_stride;
-      thr->out_pitch = output_stride;
-      thr->in_pitch = input_stride;
-      thr->width = width;
-      thr->height = y_end - y_start;
+      unsigned y_start       = (height * i) / filt->threads;
+      unsigned y_end         = (height * (i + 1)) / filt->threads;
+      thr->out_data          = (uint8_t*)output + y_start * SUPEREAGLE_SCALE * output_stride;
+      thr->in_data           = (const uint8_t*)input + y_start * input_stride;
+      thr->out_pitch         = output_stride;
+      thr->in_pitch          = input_stride;
+      thr->width             = width;
+      thr->height            = y_end - y_start;
 
       /* Workers need to know if they can access pixels outside their given buffer. */
-      thr->first = y_start;
-      thr->last = y_end == height;
+      thr->first             = y_start;
+      thr->last              = y_end == height;
 
       if (filt->in_fmt == SOFTFILTER_FMT_RGB565)
-         packets[i].work = supereagle_work_cb_rgb565;
+         packets[i].work     = supereagle_work_cb_rgb565;
       else if (filt->in_fmt == SOFTFILTER_FMT_XRGB8888)
-         packets[i].work = supereagle_work_cb_xrgb8888;
+         packets[i].work     = supereagle_work_cb_xrgb8888;
       packets[i].thread_data = thr;
    }
 }
@@ -342,7 +366,6 @@ static const struct softfilter_implementation supereagle_generic = {
 
 const struct softfilter_implementation *softfilter_get_implementation(softfilter_simd_mask_t simd)
 {
-   (void)simd;
    return &supereagle_generic;
 }
 

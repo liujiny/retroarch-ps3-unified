@@ -24,7 +24,6 @@
 #include <EGL/eglext.h>
 
 #include <retro_inline.h>
-#include <retro_assert.h>
 #include <gfx/math/matrix_3x3.h>
 #include <libretro.h>
 
@@ -46,37 +45,35 @@
 
 typedef struct
 {
-   bool should_resize;
-   bool keep_aspect;
-   bool mEglImageBuf;
-   bool mFontsOn;
+   void *mFontRenderer;
+   void *ctx_data;
+   const gfx_ctx_driver_t *ctx_driver;
+   const font_renderer_driver_t *font_driver;
+   char *mLastMsg;
 
-   float mScreenAspect;
+   VGint scissor[4];
+   VGImageFormat mTexType;
+   VGImage mImage;
+   EGLImageKHR last_egl_image;
 
+   VGFont mFont;
+   VGuint mMsgLength;
+   VGuint mGlyphIndices[1024];
+   VGPaint mPaintFg;
+   VGPaint mPaintBg;
    unsigned mTextureWidth;
    unsigned mTextureHeight;
    unsigned mRenderWidth;
    unsigned mRenderHeight;
    unsigned x1, y1, x2, y2;
    uint32_t mFontHeight;
+   float mScreenAspect;
+   math_matrix_3x3 mTransformMatrix; /* float alignment */
 
-   char *mLastMsg;
-
-   VGint scissor[4];
-   VGImageFormat mTexType;
-   VGImage mImage;
-   math_matrix_3x3 mTransformMatrix;
-   EGLImageKHR last_egl_image;
-
-   VGFont mFont;
-   void *mFontRenderer;
-   const font_renderer_driver_t *font_driver;
-   VGuint mMsgLength;
-   VGuint mGlyphIndices[1024];
-   VGPaint mPaintFg;
-   VGPaint mPaintBg;
-   void *ctx_data;
-   const gfx_ctx_driver_t *ctx_driver;
+   bool should_resize;
+   bool keep_aspect;
+   bool mEglImageBuf;
+   bool mFontsOn;
 } vg_t;
 
 static PFNVGCREATEEGLIMAGETARGETKHRPROC pvgCreateEGLImageTargetKHR;
@@ -99,7 +96,7 @@ static INLINE bool vg_query_extension(const char *ext)
 {
    const char *str = (const char*)vgGetString(VG_EXTENSIONS);
    bool ret = str && strstr(str, ext);
-   RARCH_LOG("[VG]: Querying VG extension: %s => %s\n",
+   RARCH_LOG("[VG] Querying VG extension: %s => %s.\n",
          ext, ret ? "exists" : "doesn't exist");
 
    return ret;
@@ -145,10 +142,10 @@ static void *vg_init(const video_info_t *video,
    temp_width  = mode_width;
    temp_height = mode_height;
 
-   RARCH_LOG("[VG]: Detecting screen resolution: %ux%u.\n", temp_width, temp_height);
+   RARCH_LOG("[VG] Detecting screen resolution: %ux%u.\n", temp_width, temp_height);
 
    if (temp_width != 0 && temp_height != 0)
-      video_driver_set_size(temp_width, temp_height);
+      video_driver_set_output_size(temp_width, temp_height);
 
    interval = video->vsync ? 1 : 0;
 
@@ -167,7 +164,7 @@ static void *vg_init(const video_info_t *video,
 
    if (video->fullscreen && (win_width == 0) && (win_height == 0))
    {
-      video_driver_get_size(&temp_width, &temp_height);
+      video_driver_get_output_size(&temp_width, &temp_height);
 
       win_width  = temp_width;
       win_height = temp_height;
@@ -177,8 +174,6 @@ static void *vg_init(const video_info_t *video,
          || !vg->ctx_driver->set_video_mode(vg->ctx_data,
             win_width, win_height, video->fullscreen))
       goto error;
-
-   video_driver_get_size(&temp_width, &temp_height);
 
    temp_width        = 0;
    temp_height       = 0;
@@ -196,12 +191,12 @@ static void *vg_init(const video_info_t *video,
 
    if (temp_width != 0 && temp_height != 0)
    {
-      RARCH_LOG("[VG]: Verified window resolution %ux%u.\n",
+      RARCH_LOG("[VG] Verified window resolution %ux%u.\n",
             temp_width, temp_height);
-      video_driver_set_size(temp_width, temp_height);
+      video_driver_set_output_size(temp_width, temp_height);
    }
-
-   video_driver_get_size(&temp_width, &temp_height);
+   else
+      video_driver_get_output_size(&temp_width, &temp_height);
 
    vg->mScreenAspect = (float)temp_width / temp_height;
 
@@ -233,7 +228,7 @@ static void *vg_init(const video_info_t *video,
          && font_renderer_create_default(
             &vg->font_driver, &vg->mFontRenderer,
             *path_font ? path_font : NULL,
-            video_font_size))
+            video_font_size, FONT_ATLAS_FORMAT_A8))
    {
       vg->mFont            = vgCreateFont(0);
 
@@ -274,16 +269,10 @@ static void *vg_init(const video_info_t *video,
 
       if (pvgCreateEGLImageTargetKHR)
       {
-         RARCH_LOG("[VG] Using EGLImage buffer\n");
+         RARCH_LOG("[VG] Using EGLImage buffer.\n");
          vg->mEglImageBuf = true;
       }
    }
-
-#if 0
-   const char *ext = (const char*)vgGetString(VG_EXTENSIONS);
-   if (ext)
-      RARCH_LOG("[VG] Supported extensions: %s\n", ext);
-#endif
 
    return vg;
 
@@ -319,47 +308,25 @@ static void vg_free(void *data)
 }
 
 static void vg_calculate_quad(vg_t *vg,
-      unsigned width, unsigned height)
+      unsigned vp_width, unsigned vp_height)
 {
-   /* set viewport for aspect ratio, taken from the OpenGL driver. */
-   if (vg->keep_aspect)
-   {
-      float desired_aspect = video_driver_get_aspect_ratio();
+   video_viewport_t vp;
 
-      /* If the aspect ratios of screen and desired aspect ratio
-       * are sufficiently equal (floating point stuff),
-       * assume they are actually equal. */
-      if (fabs(vg->mScreenAspect - desired_aspect) < 0.0001)
-      {
-         vg->x1 = 0;
-         vg->y1 = 0;
-         vg->x2 = width;
-         vg->y2 = height;
-      }
-      else if (vg->mScreenAspect > desired_aspect)
-      {
-         float delta = (desired_aspect / vg->mScreenAspect - 1.0) / 2.0 + 0.5;
-         vg->x1 = width * (0.5 - delta);
-         vg->y1 = 0;
-         vg->x2 = 2.0 * width * delta + vg->x1;
-         vg->y2 = height + vg->y1;
-      }
-      else
-      {
-         float delta = (vg->mScreenAspect / desired_aspect - 1.0) / 2.0 + 0.5;
-         vg->x1 = 0;
-         vg->y1 = height * (0.5 - delta);
-         vg->x2 = width + vg->x1;
-         vg->y2 = 2.0 * height * delta + vg->y1;
-      }
-   }
-   else
-   {
-      vg->x1 = 0;
-      vg->y1 = 0;
-      vg->x2 = width;
-      vg->y2 = height;
-   }
+   vp.full_width   = vp_width;
+   vp.full_height  = vp_height;
+
+   /* Calculate device_aspect for mScreenAspect (used elsewhere) */
+   vg->mScreenAspect = (float)vp_width / vp_height;
+   if (vg->ctx_driver->translate_aspect)
+      vg->mScreenAspect = vg->ctx_driver->translate_aspect(vg->ctx_data, vp_width, vp_height);
+
+   /* OpenVG uses a bottom-left origin coordinate system */
+   video_driver_update_viewport(&vp, false, vg->keep_aspect, false);
+
+   vg->x1 = vp.x;
+   vg->y1 = vp.y;
+   vg->x2 = vp.width;
+   vg->y2 = vp.height;
 
    vg->scissor[0] = vg->x1;
    vg->scissor[1] = vg->y1;
@@ -387,8 +354,6 @@ static void vg_copy_frame(void *data, const void *frame,
                0,
                &img);
 
-      retro_assert(img != EGL_NO_IMAGE_KHR);
-
       if (new_egl)
       {
          vgDestroyImage(vg->mImage);
@@ -396,7 +361,7 @@ static void vg_copy_frame(void *data, const void *frame,
          if (!vg->mImage)
          {
             RARCH_ERR(
-                  "[VG:EGLImage] Error creating image: %08x\n",
+                  "[VG] Error creating image: %08x.\n",
                   vgGetError());
             exit(2);
          }
@@ -416,10 +381,10 @@ static bool vg_frame(void *data, const void *frame,
    unsigned width                     = video_info->width;
    unsigned height                    = video_info->height;
 #ifdef HAVE_MENU
-   bool menu_is_alive                 = video_info->menu_is_alive;
+   bool menu_is_alive                 = (video_info->menu_st_flags & MENU_ST_FLAG_ALIVE) ? true : false;
 #endif
 
-   if (     frame_width != vg->mRenderWidth
+   if (     frame_width  != vg->mRenderWidth
          || frame_height != vg->mRenderHeight
          || vg->should_resize)
    {
@@ -475,7 +440,7 @@ static bool vg_alive(void *data)
             &quit, &resize, &temp_width, &temp_height);
 
    if (temp_width != 0 && temp_height != 0)
-      video_driver_set_size(temp_width, temp_height);
+      video_driver_set_output_size(temp_width, temp_height);
 
    return !quit;
 }
@@ -521,16 +486,19 @@ video_driver_t video_vg = {
    vg_set_shader,
    vg_free,
    "vg",
-   NULL,                      /* set_viewport */
-   NULL,                      /* set_rotation */
-   NULL,                      /* viewport_info */
-   NULL,                      /* read_viewport */
-   NULL,                      /* read_frame_raw */
+   NULL, /* set_viewport */
+   NULL, /* set_rotation */
+   NULL, /* viewport_info */
+   NULL, /* read_viewport */
+   NULL, /* read_frame_raw */
 #ifdef HAVE_OVERLAY
-  NULL,                       /* overlay_interface */
+   NULL, /* get_overlay_interface */
 #endif
-#ifdef HAVE_VIDEO_LAYOUT
-  NULL,
+   vg_get_poke_interface,
+   NULL, /* wrap_type_to_enum */
+   NULL, /* shader_load_begin */
+   NULL, /* shader_load_step */
+#ifdef HAVE_GFX_WIDGETS
+   NULL  /* gfx_widgets_enabled */
 #endif
-  vg_get_poke_interface
 };

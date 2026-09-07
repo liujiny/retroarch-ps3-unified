@@ -18,19 +18,17 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <errno.h>
 
-#include "../../verbosity.h"
 #include <fcntl.h>
+#include <unistd.h>
+#include <sys/mman.h>
 #include <rga/RgaApi.h>
-#include <rga/RockchipRgaMacro.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <drm/drm_fourcc.h>
 
-#include "frontend/frontend_driver.h"
-
-#include "../font_driver.h"
-#include "libretro.h"
+#include <libretro.h>
 
 #ifdef HAVE_CONFIG_H
 #include "../../config.h"
@@ -40,8 +38,13 @@
 #include "../../menu/menu_driver.h"
 #endif
 
+#include "frontend/frontend_driver.h"
+
+#include "../font_driver.h"
+
 #include "../../configuration.h"
 #include "../../retroarch.h"
+#include "../../verbosity.h"
 
 #define likely(x)   __builtin_expect(!!(x), 1)
 #define unlikely(x) __builtin_expect(!!(x), 0)
@@ -66,7 +69,6 @@ typedef struct oga_surface
    int pitch;
    int prime_fd;
    int rk_format;
-
    int display_fd;
    uint32_t handle;
 } oga_surface_t;
@@ -79,34 +81,31 @@ typedef struct oga_framebuf
 
 typedef struct oga_video
 {
-   int fd;
-   uint32_t connector_id;
    drmModeModeInfo mode;
-   int drm_width;
-   int drm_height;
-   float display_ar;
-   uint32_t crtc_id;
-
-   oga_surface_t* frame_surface;
-   oga_surface_t* menu_surface;
-
-   oga_framebuf_t* pages[NUM_PAGES];
-   int cur_page;
-   int scale_mode;
-   int rotation;
-   bool threaded;
-
-   oga_surface_t* msg_surface;
+   oga_surface_t *frame_surface;
+   oga_surface_t *menu_surface;
+   oga_framebuf_t *pages[NUM_PAGES];
+   oga_surface_t *msg_surface;
    const font_renderer_driver_t *font_driver;
    void *font;
    int msg_width;
    int msg_height;
+   int fd;
+   int drm_width;
+   int drm_height;
+   int cur_page;
+   int scale_mode;
+   int rotation;
+   uint32_t crtc_id;
+   uint32_t connector_id;
+   float display_ar;
+   bool threaded;
    char last_msg[128];
 } oga_video_t;
 
 static bool oga_create_display(oga_video_t* vid)
 {
-   int i, ret;
+   int i;
    drmModeConnector *connector;
    drmModeModeInfo *mode;
    drmModeEncoder *encoder;
@@ -115,7 +114,7 @@ static bool oga_create_display(oga_video_t* vid)
    vid->fd = open("/dev/dri/card0", O_RDWR);
    if (vid->fd < 0)
    {
-      RARCH_ERR("open /dev/dri/card0 failed.\n");
+      RARCH_ERR("Open /dev/dri/card0 failed.\n");
       return false;
    }
 
@@ -144,7 +143,7 @@ static bool oga_create_display(oga_video_t* vid)
 
    vid->connector_id = connector->connector_id;
 
-   /* Find prefered mode */
+   /* Find preferred mode */
    for (i = 0; i < connector->count_modes; i++)
    {
       drmModeModeInfo *current_mode = &connector->modes[i];
@@ -178,7 +177,7 @@ static bool oga_create_display(oga_video_t* vid)
 
    if (!encoder)
    {
-      RARCH_ERR("could not find encoder!\n");
+      RARCH_ERR("Could not find encoder.\n");
       goto err_03;
    }
 
@@ -210,7 +209,7 @@ static oga_surface_t* oga_create_surface(int display_fd,
       calloc(1, sizeof(oga_surface_t));
    if (!surface)
    {
-      RARCH_ERR("Error allocating surface\n");
+      RARCH_ERR("Error allocating surface.\n");
       return NULL;
    }
 
@@ -241,7 +240,7 @@ static oga_surface_t* oga_create_surface(int display_fd,
    surface->map = mmap(NULL, args.size, PROT_READ | PROT_WRITE, MAP_SHARED, surface->prime_fd, 0);
    if (surface->map == MAP_FAILED)
    {
-      RARCH_LOG("mmap failed.\n");
+      RARCH_ERR("mmap failed.\n");
       return NULL;
    }
 
@@ -277,7 +276,7 @@ static oga_framebuf_t* oga_create_framebuf(oga_surface_t* surface)
 
    if (!framebuf)
    {
-      RARCH_ERR("Error allocating framebuf\n");
+      RARCH_ERR("Error allocating framebuf.\n");
       return NULL;
    }
 
@@ -313,7 +312,7 @@ static void oga_destroy_framebuf(oga_framebuf_t* framebuf)
    free(framebuf);
 }
 
-static void oga_gfx_free(void *data)
+static void oga_free(void *data)
 {
    unsigned i;
    oga_video_t *vid = (oga_video_t*)data;
@@ -321,11 +320,10 @@ static void oga_gfx_free(void *data)
    if (!vid)
       return;
 
-   if (vid->font)
-   {
+   if (vid->font_driver && vid->font)
       vid->font_driver->free(vid->font);
-      vid->font_driver = NULL;
-   }
+   vid->font_driver = NULL;
+   vid->font        = NULL;
 
    for (i = 0; i < NUM_PAGES; ++i)
       oga_destroy_framebuf(vid->pages[i]);
@@ -340,16 +338,15 @@ static void oga_gfx_free(void *data)
    vid = NULL;
 }
 
-static void *oga_gfx_init(const video_info_t *video,
+static void *oga_init(const video_info_t *video,
       input_driver_t **input, void **input_data)
 {
    int i;
    oga_video_t *vid                     = NULL;
    settings_t *settings                 = config_get_ptr();
-   struct retro_system_av_info *av_info = video_viewport_get_system_av_info();
+   video_driver_state_t *video_st       = video_state_get_ptr();
+   struct retro_system_av_info *av_info = &video_st->av_info;
    struct retro_game_geometry  *geom    = &av_info->geometry;
-   int aw                               = ALIGN(geom->base_width, 32);
-   int ah                               = ALIGN(geom->base_height, 32);
 
    frontend_driver_install_signal_handler();
 
@@ -369,26 +366,19 @@ static void *oga_gfx_init(const video_info_t *video,
    vid = (oga_video_t*)calloc(1, sizeof(*vid));
    if (!vid)
    {
-      RARCH_ERR("Error allocating vid\n");
+      RARCH_ERR("Error allocating vid.\n");
       return NULL;
    }
 
    if (!oga_create_display(vid))
    {
-      RARCH_ERR("Error initializing drm\n");
+      RARCH_ERR("Error initializing drm.\n");
       return NULL;
    }
 
    vid->display_ar = (float)vid->mode.vdisplay / vid->mode.hdisplay;
    vid->drm_width = vid->mode.vdisplay;
    vid->drm_height = vid->mode.hdisplay;
-
-   RARCH_LOG("oga_gfx_init video %dx%d rgb32 %d smooth %d ctx_scaling %d"
-         " input_scale %u force_aspect %d fullscreen %d threaded %d base_width %d base_height %d"
-         " max_width %d max_height %d aw %d ah %d\n",
-         video->width, video->height, video->rgb32, video->smooth, video->ctx_scaling,
-         video->input_scale, video->force_aspect, video->fullscreen, video->is_threaded, geom->base_width, geom->base_height,
-         geom->max_width, geom->max_height, aw, ah);
 
    vid->menu_surface = oga_create_surface(vid->fd, vid->drm_width, vid->drm_height, RK_FORMAT_BGRA_8888);
    vid->threaded = video->is_threaded;
@@ -408,11 +398,25 @@ static void *oga_gfx_init(const video_info_t *video,
    vid->msg_surface   = oga_create_surface(vid->fd, vid->drm_width, vid->drm_height, RK_FORMAT_BGRA_8888);
    vid->last_msg[0]   = 0;
 
-   /* bitmap only for now */
    if (settings->bools.video_font_enable)
    {
-      vid->font_driver = &bitmap_font_renderer;
-      vid->font = vid->font_driver->init("", settings->floats.video_font_size);
+      /* Through font_renderer_create_default(), as every other driver
+       * does: it resolves the path, reads the file and picks a
+       * backend.  Reaching for &stb_font_renderer and calling its
+       * init() by hand meant this driver had to track that function's
+       * signature, and it stopped doing so - the call passed three
+       * arguments to a five-argument prototype and had not compiled
+       * for some time.  A NULL path still ends at stb's built-in
+       * glyphs when no font file is configured or found, which is the
+       * behaviour that was wanted here. */
+      if (!font_renderer_create_default(&vid->font_driver, &vid->font,
+               *settings->paths.path_font ? settings->paths.path_font : NULL,
+               (unsigned)settings->floats.video_font_size,
+               FONT_ATLAS_FORMAT_A8))
+      {
+         vid->font_driver = NULL;
+         vid->font        = NULL;
+      }
    }
 
    for (i = 0; i < NUM_PAGES; ++i)
@@ -490,11 +494,11 @@ static bool render_msg(oga_video_t* vid, const char* msg)
          atlas->width  + g->atlas_offset_x;
       dest   = fb + dest_y * dest_stride + dest_x;
 
-      for (y = 0; y < g->height; y++)
+      for (y = 0; y < (int)g->height; y++)
       {
-         for (x = 0; x < g->advance_x; x++)
+         for (x = 0; x < (int)g->advance_x; x++)
          {
-            uint32_t px = (x < g->width) ? *(source++) : 0x00;
+            uint32_t px = (x < (int)g->width) ? *(source++) : 0x00;
             *(dest++)   = (0xCD << 24) | (px << 16) | (px << 8) | px;
          }
          dest   += dest_stride - g->advance_x;
@@ -552,14 +556,17 @@ static void oga_calc_bounds(oga_rect_t* r, int dw, int dh, int sw, int sh, float
    }
 }
 
-static bool oga_gfx_frame(void *data, const void *frame, unsigned width,
+static bool oga_frame(void *data, const void *frame, unsigned width,
       unsigned height, uint64_t frame_count,
       unsigned pitch, const char *msg, video_frame_info_t *video_info)
 {
-   oga_video_t *vid  = (oga_video_t*)data;
-   oga_framebuf_t* page = vid->pages[vid->cur_page];
+   oga_video_t *vid            = (oga_video_t*)data;
+   oga_framebuf_t* page        = vid->pages[vid->cur_page];
    oga_surface_t *page_surface = page->surface;
-   float aspect_ratio = video_driver_get_aspect_ratio();
+   float aspect_ratio          = video_driver_get_aspect_ratio();
+#ifdef HAVE_MENU
+   bool menu_is_alive = (video_info->menu_st_flags & MENU_ST_FLAG_ALIVE) ? true : false;
+#endif
 
    if (unlikely(!frame || width == 0 || height == 0))
       return true;
@@ -578,7 +585,22 @@ static bool oga_gfx_frame(void *data, const void *frame, unsigned width,
 
    rga_clear_surface(page_surface, 0);
 
-   if (likely(!video_info->menu_is_alive))
+#ifdef HAVE_MENU
+   if (menu_is_alive)
+   {
+      oga_rect_t r;
+      menu_driver_frame(true, video_info);
+
+      width        = vid->menu_surface->width;
+      height       = vid->menu_surface->height;
+      aspect_ratio = (float)width / height;
+
+      oga_calc_bounds(&r, vid->drm_width, vid->drm_height, width, height, aspect_ratio, vid->display_ar);
+      oga_blit(vid->menu_surface, 0, 0, width, height,
+            page_surface, r.y, r.x, r.h, r.w, HAL_TRANSFORM_ROT_270, vid->scale_mode, 0);
+   }
+   else
+#endif
    {
       uint8_t* src = (uint8_t*)frame;
       uint8_t* dst = (uint8_t*)vid->frame_surface->map;
@@ -590,7 +612,8 @@ static bool oga_gfx_frame(void *data, const void *frame, unsigned width,
          int dst_pitch = vid->frame_surface->pitch;
          int yy = height;
 
-         while (yy > 0) {
+         while (yy > 0)
+         {
              memcpy(dst, src, pitch);
              src += pitch;
              dst += dst_pitch;
@@ -602,22 +625,6 @@ static bool oga_gfx_frame(void *data, const void *frame, unsigned width,
       oga_blit(vid->frame_surface, 0, 0, width, height,
             page_surface, r.y, r.x, r.h, r.w, vid->rotation, vid->scale_mode, blend);
    }
-#ifdef HAVE_MENU
-   else
-   {
-      menu_driver_frame(true, video_info);
-
-      width = vid->menu_surface->width;
-      height = vid->menu_surface->height;
-
-      aspect_ratio = (float)width / height;
-
-      oga_rect_t r;
-      oga_calc_bounds(&r, vid->drm_width, vid->drm_height, width, height, aspect_ratio, vid->display_ar);
-      oga_blit(vid->menu_surface, 0, 0, width, height,
-            page_surface, r.y, r.x, r.h, r.w, HAL_TRANSFORM_ROT_270, vid->scale_mode, 0);
-   }
-#endif
 
    if (msg)
    {
@@ -634,7 +641,7 @@ static bool oga_gfx_frame(void *data, const void *frame, unsigned width,
    return true;
 }
 
-static void oga_gfx_set_texture_frame(void *data, const void *frame, bool rgb32,
+static void oga_set_texture_frame(void *data, const void *frame, bool rgb32,
       unsigned width, unsigned height, float alpha)
 {
    oga_video_t *vid             = (oga_video_t*)data;
@@ -646,11 +653,10 @@ static void oga_gfx_set_texture_frame(void *data, const void *frame, bool rgb32,
     * in an 8888 format. */
    unsigned int src_pitch        = width * 2;
    unsigned int dst_pitch        = width * 4;
-   unsigned int dst_width        = width;
-   uint32_t line[dst_width];
    char *frame_output;
 
-   if (vid->menu_surface->width != width || vid->menu_surface->height != height)
+   if (     vid->menu_surface->width  != (int)width
+         || vid->menu_surface->height != (int)height)
    {
       oga_destroy_surface(vid->menu_surface);
       vid->menu_surface = oga_create_surface(vid->fd, width, height,
@@ -662,39 +668,37 @@ static void oga_gfx_set_texture_frame(void *data, const void *frame, bool rgb32,
 
    for (i = 0; i < height; i++)
    {
+      const uint16_t *src_row = (const uint16_t*)frame + (src_pitch / 2 * i);
+      uint32_t *dst_row       = (uint32_t*)(void*)
+         (frame_output + (dst_pitch * i));
+
       for (j = 0; j < src_pitch / 2; j++)
       {
-         uint16_t src_pix = *((uint16_t*)frame + (src_pitch / 2 * i) + j);
+         uint16_t src_pix = src_row[j];
          /* The hex AND is for keeping only the part
           * we need for each component. */
          uint32_t R       = (src_pix << 8) & 0x00FF0000;
          uint32_t G       = (src_pix << 4) & 0x0000FF00;
          uint32_t B       = (src_pix << 0) & 0x000000FF;
-         line[j]          = (0x00 | R | G | B);
+         dst_row[j]       = (0x00 | R | G | B);
       }
-      memcpy(frame_output + (dst_pitch * i), (char*)line, dst_pitch);
    }
 }
 
-static void oga_gfx_texture_enable(void *data, bool state, bool full_screen)
-{
-   (void)data;
-   (void)state;
-   (void)full_screen;
-}
+/* TODO/FIXME - implement */
+static void oga_texture_enable(void *data, bool state, bool full_screen) { }
+static void oga_set_nonblock_state(void *a, bool b, bool c, unsigned d) { }
 
-static void oga_gfx_set_nonblock_state(void *a, bool b, bool c, unsigned d) { }
-
-static bool oga_gfx_alive(void *data)
+static bool oga_alive(void *data)
 {
    return !frontend_driver_get_signal_handler_state();
 }
 
-static bool oga_gfx_focus(void *data) { return true; }
-static bool oga_gfx_suppress_screensaver(void *data, bool enable) { return false; }
-static bool oga_gfx_has_windowed(void *data) { return false; }
+static bool oga_focus(void *data) { return true; }
+static bool oga_suppress_screensaver(void *a, bool b) { return false; }
+static bool oga_has_windowed(void *data) { return false; }
 
-static void oga_gfx_viewport_info(void *data, struct video_viewport *vp)
+static void oga_viewport_info(void *data, struct video_viewport *vp)
 {
    oga_video_t *vid = (oga_video_t*)data;
    if (unlikely(!vid))
@@ -705,12 +709,8 @@ static void oga_gfx_viewport_info(void *data, struct video_viewport *vp)
    vp->height = vp->full_height = vid->mode.hdisplay;
 }
 
-static bool oga_gfx_set_shader(void *data, enum rarch_shader_type type, const char *path)
+static bool oga_set_shader(void *data, enum rarch_shader_type type, const char *path)
 {
-   (void)data;
-   (void)type;
-   (void)path;
-
    return false;
 }
 
@@ -755,27 +755,32 @@ static bool oga_get_current_software_framebuffer(void *data, struct retro_frameb
 }
 
 video_poke_interface_t oga_poke_interface = {
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   oga_gfx_set_texture_frame,
-   oga_gfx_texture_enable,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
+   NULL, /* get_flags */
+   NULL, /* load_texture */
+   NULL, /* unload_texture */
+   NULL, /* set_video_mode */
+   NULL, /* get_refresh_rate */
+   NULL, /* set_filtering */
+   NULL, /* get_video_output_size */
+   NULL, /* get_video_output_prev */
+   NULL, /* get_video_output_next */
+   NULL, /* get_current_framebuffer */
+   NULL, /* get_proc_address */
+   NULL, /* set_aspect_ratio */
+   NULL, /* apply_state_changes */
+   oga_set_texture_frame,
+   oga_texture_enable,
+   NULL, /* set_osd_msg */
+   NULL, /* show_mouse */
+   NULL, /* grab_mouse_toggle */
+   NULL, /* get_current_shader */
    oga_get_current_software_framebuffer,
-   NULL
+   NULL, /* get_hw_render_interface */
+   NULL, /* set_hdr_menu_nits */
+   NULL, /* set_hdr_paper_white_nits */
+   NULL, /* set_hdr_expand_gamut */
+   NULL, /* set_hdr_scanlines */
+   NULL  /* set_hdr_subpixel_layout */
 };
 
 static void oga_get_poke_interface(void *data, const video_poke_interface_t **iface)
@@ -784,26 +789,29 @@ static void oga_get_poke_interface(void *data, const video_poke_interface_t **if
 }
 
 video_driver_t video_oga = {
-   oga_gfx_init,
-   oga_gfx_frame,
-   oga_gfx_set_nonblock_state,
-   oga_gfx_alive,
-   oga_gfx_focus,
-   oga_gfx_suppress_screensaver,
-   oga_gfx_has_windowed,
-   oga_gfx_set_shader,
-   oga_gfx_free,
+   oga_init,
+   oga_frame,
+   oga_set_nonblock_state,
+   oga_alive,
+   oga_focus,
+   oga_suppress_screensaver,
+   oga_has_windowed,
+   oga_set_shader,
+   oga_free,
    "oga",
-   NULL,
+   NULL, /* set_viewport */
    oga_set_rotation,
-   oga_gfx_viewport_info,
-   NULL,
-   NULL,
+   oga_viewport_info,
+   NULL, /* read_viewport */
+   NULL, /* read_frame_raw */
 #ifdef HAVE_OVERLAY
-   NULL,
+   NULL, /* get_overlay_interface */
 #endif
-#ifdef HAVE_VIDEO_LAYOUT
-   NULL,
+   oga_get_poke_interface,
+   NULL, /* wrap_type_to_enum */
+   NULL, /* shader_load_begin */
+   NULL, /* shader_load_step */
+#ifdef HAVE_GFX_WIDGETS
+   NULL  /* gfx_widgets_enabled */
 #endif
-   oga_get_poke_interface
 };

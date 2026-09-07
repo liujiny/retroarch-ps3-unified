@@ -18,10 +18,8 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include <retro_assert.h>
 #include <gfx/scaler/scaler.h>
 #include <gfx/video_frame.h>
-#include <retro_assert.h>
 #include "../../verbosity.h"
 
 #ifdef HAVE_CONFIG_H
@@ -46,24 +44,23 @@
 
 typedef struct sdl_menu_frame
 {
-   bool active;
    struct scaler_ctx scaler;
    SDL_Surface *frame;
+   bool active;
 } sdl_menu_frame_t;
 
 typedef struct sdl_video
 {
-   bool quitting;
-   uint8_t font_r;
-   uint8_t font_g;
-   uint8_t font_b;
-
    struct scaler_ctx scaler;
    sdl_menu_frame_t menu;
    SDL_Surface *screen;
 
    void *font;
    const font_renderer_driver_t *font_driver;
+   uint8_t font_r;
+   uint8_t font_g;
+   uint8_t font_b;
+   bool quitting;
 } sdl_video_t;
 
 static void sdl_gfx_free(void *data)
@@ -101,9 +98,9 @@ static void sdl_init_font(sdl_video_t *vid,
    if (!font_renderer_create_default(
             &vid->font_driver, &vid->font,
             *path_font ? path_font : NULL,
-            video_font_size))
+            video_font_size, FONT_ATLAS_FORMAT_A8))
    {
-      RARCH_LOG("[SDL]: Could not initialize fonts.\n");
+      RARCH_LOG("[SDL] Could not initialize fonts.\n");
       return;
    }
 
@@ -190,7 +187,7 @@ static void sdl_render_msg(
       if (glyph_height > max_height)
          glyph_height = max_height;
 
-      out = (uint32_t*)buffer->pixels + base_y 
+      out = (uint32_t*)buffer->pixels + base_y
          * (buffer->pitch >> 2) + base_x;
 
       for (y = 0; y < glyph_height; y++, src += atlas->width, out += buffer->pitch >> 2)
@@ -206,7 +203,7 @@ static void sdl_render_msg(
             unsigned   out_r = (r * (256 - blend) + vid->font_r * blend) >> 8;
             unsigned   out_g = (g * (256 - blend) + vid->font_g * blend) >> 8;
             unsigned   out_b = (b * (256 - blend) + vid->font_b * blend) >> 8;
-            out[x]           = (out_r << rshift) | 
+            out[x]           = (out_r << rshift) |
                                (out_g << gshift) |
                                (out_b << bshift);
          }
@@ -270,18 +267,16 @@ static void *sdl_gfx_init(const video_info_t *video,
          return NULL;
    }
 
-   vid = (sdl_video_t*)calloc(1, sizeof(*vid));
-   if (!vid)
+   if (!(vid = (sdl_video_t*)calloc(1, sizeof(*vid))))
       return NULL;
 
    video_info = SDL_GetVideoInfo();
-   retro_assert(video_info);
-   full_x = video_info->current_w;
-   full_y = video_info->current_h;
-   RARCH_LOG("[SDL]: Detecting desktop resolution %ux%u.\n", full_x, full_y);
+   full_x     = video_info->current_w;
+   full_y     = video_info->current_h;
+   RARCH_LOG("[SDL] Detecting desktop resolution %ux%u.\n", full_x, full_y);
 
    if (!video->fullscreen)
-      RARCH_LOG("[SDL]: Creating window @ %ux%u\n", video->width, video->height);
+      RARCH_LOG("[SDL] Creating window @ %ux%u.\n", video->width, video->height);
 
    vid->screen = SDL_SetVideoMode(video->width, video->height, 32,
          SDL_HWSURFACE | SDL_HWACCEL | SDL_DOUBLEBUF | (video->fullscreen ? SDL_FULLSCREEN : 0));
@@ -292,7 +287,7 @@ static void *sdl_gfx_init(const video_info_t *video,
 
    if (!vid->screen)
    {
-      RARCH_ERR("[SDL1]: Failed to init SDL surface: %s\n", SDL_GetError());
+      RARCH_ERR("[SDL] Failed to init SDL surface: %s.\n", SDL_GetError());
       goto error;
    }
 
@@ -337,7 +332,7 @@ static void *sdl_gfx_init(const video_info_t *video,
 
    if (!vid->menu.frame)
    {
-      RARCH_ERR("[SDL1]: Failed to init menu surface: %s\n", SDL_GetError());
+      RARCH_ERR("[SDL] Failed to init menu surface: %s.\n", SDL_GetError());
       goto error;
    }
 
@@ -368,9 +363,9 @@ static bool sdl_gfx_frame(void *data, const void *frame, unsigned width,
       unsigned pitch, const char *msg, video_frame_info_t *video_info)
 {
    char title[128];
-   sdl_video_t                    *vid = (sdl_video_t*)data;
+   sdl_video_t   *vid = (sdl_video_t*)data;
 #ifdef HAVE_MENU
-   bool menu_is_alive                  = video_info->menu_is_alive;
+   bool menu_is_alive = (video_info->menu_st_flags & MENU_ST_FLAG_ALIVE) ? true : false;
 #endif
 
    if (!frame)
@@ -433,19 +428,7 @@ static bool sdl_gfx_focus(void *data)
    return (SDL_GetAppState() & (SDL_APPINPUTFOCUS | SDL_APPACTIVE)) == (SDL_APPINPUTFOCUS | SDL_APPACTIVE);
 }
 
-static bool sdl_gfx_suppress_screensaver(void *data, bool enable)
-{
-#ifdef HAVE_X11
-   if (video_driver_display_type_get() == RARCH_DISPLAY_X11)
-   {
-      x11_suspend_screensaver(video_driver_window_get(), enable);
-      return true;
-   }
-#endif
-
-   return false;
-}
-
+static bool sdl_gfx_suspend_screensaver(void *data, bool enable) { return false; }
 /* TODO/FIXME - implement */
 static bool sdl_gfx_has_windowed(void *data) { return true; }
 
@@ -528,9 +511,9 @@ static uint32_t sdl_get_flags(void *data)
 
 static const video_poke_interface_t sdl_poke_interface = {
    sdl_get_flags,
-   NULL,
-   NULL,
-   NULL,
+   NULL, /* load_texture */
+   NULL, /* unload_texture */
+   NULL, /* set_video_mode */
    NULL, /* get_refresh_rate */
    sdl_set_filtering,
    NULL, /* get_video_output_size */
@@ -538,20 +521,21 @@ static const video_poke_interface_t sdl_poke_interface = {
    NULL, /* get_video_output_next */
    NULL, /* get_current_framebuffer */
    NULL, /* get_proc_address */
-   NULL,
+   NULL, /* set_aspect_ratio */
    sdl_apply_state_changes,
    sdl_set_texture_frame,
    sdl_set_texture_enable,
-   NULL,
+   NULL, /* set_osd_msg */
    sdl_show_mouse,
    sdl_grab_mouse_toggle,
-   NULL,                         /* get_current_shader */
-   NULL,                         /* get_current_software_framebuffer */
-   NULL,                         /* get_hw_render_interface */
-   NULL,                         /* set_hdr_max_nits */
-   NULL,                         /* set_hdr_paper_white_nits */
-   NULL,                         /* set_hdr_contrast */
-   NULL                          /* set_hdr_expand_gamut */
+   NULL, /* get_current_shader */
+   NULL, /* get_current_software_framebuffer */
+   NULL, /* get_hw_render_interface */
+   NULL, /* set_hdr_menu_nits */
+   NULL, /* set_hdr_paper_white_nits */
+   NULL, /* set_hdr_expand_gamut */
+   NULL, /* set_hdr_scanlines */
+   NULL  /* set_hdr_subpixel_layout */
 };
 
 static void sdl_get_poke_interface(void *data, const video_poke_interface_t **iface)
@@ -577,21 +561,28 @@ video_driver_t video_sdl = {
    sdl_gfx_set_nonblock_state,
    sdl_gfx_alive,
    sdl_gfx_focus,
-   sdl_gfx_suppress_screensaver,
+#ifdef HAVE_X11
+   x11_suspend_screensaver,
+#else
+   sdl_gfx_suspend_screensaver,
+#endif
    sdl_gfx_has_windowed,
    sdl_gfx_set_shader,
    sdl_gfx_free,
    "sdl",
-   NULL,
+   NULL, /* set_viewport */
    NULL, /* set_rotation */
    sdl_gfx_viewport_info,
    NULL, /* read_viewport  */
    NULL, /* read_frame_raw */
 #ifdef HAVE_OVERLAY
-   NULL,
+   NULL, /* get_overlay_interface */
 #endif
-#ifdef HAVE_VIDEO_LAYOUT
-  NULL,
+   sdl_get_poke_interface,
+   NULL, /* wrap_type_to_enum */
+   NULL, /* shader_load_begin */
+   NULL, /* shader_load_step */
+#ifdef HAVE_GFX_WIDGETS
+   NULL  /* gfx_widgets_enabled */
 #endif
-   sdl_get_poke_interface
 };

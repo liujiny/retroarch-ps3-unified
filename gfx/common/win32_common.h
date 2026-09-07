@@ -34,23 +34,59 @@
 #include <boolean.h>
 #include <retro_common_api.h>
 #include <retro_environment.h>
-#include "../../driver.h"
 #include "../../retroarch.h"
 
 #ifndef _XBOX
-#include "../../ui/drivers/ui_win32_resource.h"
 #include "../../ui/drivers/ui_win32.h"
+
+#if (defined(_MSC_VER) && (_MSC_VER >= 1400)) || defined(__MINGW32__)
+#ifndef HAVE_CLIP_WINDOW
+#define HAVE_CLIP_WINDOW
+#endif
+#endif
+
+#if defined(_WIN32_WINNT) && _WIN32_WINNT >= 0x0500 /* Windows 2000 and higher */
+
+/* Supports taskbar */
+#ifndef HAVE_TASKBAR
+#define HAVE_TASKBAR
+#endif
+
+/* Supports window transparency */
+#ifndef HAVE_WINDOW_TRANSP
+#define HAVE_WINDOW_TRANSP
+#endif
+
+#endif
+
 #endif
 
 RETRO_BEGIN_DECLS
+
+enum win32_common_flags
+{
+   WIN32_CMN_FLAG_QUIT            = (1 << 0),
+   WIN32_CMN_FLAG_RESIZED         = (1 << 1),
+   WIN32_CMN_FLAG_TASKBAR_CREATED = (1 << 2),
+   WIN32_CMN_FLAG_RESTORE_DESKTOP = (1 << 3),
+   WIN32_CMN_FLAG_INITED          = (1 << 4),
+   WIN32_CMN_FLAG_SWAP_MOUSE_BTNS = (1 << 5),
+   /* The window is inside a modal size/move or menu loop owned by
+    * DefWindowProc, and a timer is driving the run loop from within
+    * it. */
+   WIN32_CMN_FLAG_MODAL_TIMER     = (1 << 6),
+   /* A run loop iteration started from that timer is in progress. */
+   WIN32_CMN_FLAG_MODAL_TICK      = (1 << 7)
+};
+
+extern uint8_t g_win32_flags;
 
 #if !defined(_XBOX)
 extern unsigned g_win32_resize_width;
 extern unsigned g_win32_resize_height;
 extern float g_win32_refresh_rate;
-extern bool g_win32_inited;
-extern bool g_win32_restore_desktop;
 extern ui_window_win32_t main_window;
+extern HACCEL window_accelerators;
 
 void win32_monitor_get_info(void);
 
@@ -59,24 +95,15 @@ void win32_monitor_info(void *data, void *hm_data, unsigned *mon_id);
 int win32_change_display_settings(const char *str, void *devmode_data,
       unsigned flags);
 
-void create_wgl_context(HWND hwnd, bool *quit);
-
-void create_vk_context(HWND hwnd, bool *quit);
-
-void create_gdi_context(HWND hwnd, bool *quit);
-
-bool win32_get_video_output(DEVMODE *dm, int mode, size_t len);
-
 #if !defined(__WINRT__)
 bool win32_window_init(WNDCLASSEX *wndclass, bool fullscreen, const char *class_name);
 
 void win32_set_style(MONITORINFOEX *current_mon, HMONITOR *hm_to_use,
-	unsigned *width, unsigned *height, bool fullscreen, bool windowed_full,
-	RECT *rect, RECT *mon_rect, DWORD *style);
+      unsigned *width, unsigned *height, bool fullscreen, bool windowed_full,
+      RECT *rect, RECT *mon_rect, DWORD *style);
 #endif
-#endif
-
 void win32_monitor_from_window(void);
+#endif
 
 void win32_monitor_init(void);
 
@@ -84,14 +111,7 @@ bool win32_set_video_mode(void *data,
       unsigned width, unsigned height,
       bool fullscreen);
 
-bool win32_window_create(void *data, unsigned style,
-      RECT *mon_rect, unsigned width,
-      unsigned height, bool fullscreen);
-
-bool win32_suppress_screensaver(void *data, bool enable);
-
-bool win32_get_metrics(void *data,
-	enum display_metric_types type, float *value);
+bool win32_suspend_screensaver(void *data, bool enable);
 
 void win32_show_cursor(void *data, bool state);
 
@@ -103,7 +123,9 @@ bool is_running_on_xbox(void);
 
 bool win32_has_focus(void *data);
 
+#ifdef HAVE_CLIP_WINDOW
 void win32_clip_window(bool grab);
+#endif
 
 void win32_check_window(void *data,
       bool *quit,
@@ -112,22 +134,20 @@ void win32_check_window(void *data,
 void win32_set_window(unsigned *width, unsigned *height,
       bool fullscreen, bool windowed_full, void *rect_data);
 
-void win32_get_video_output_size(
-      unsigned *width, unsigned *height, char *desc, size_t desc_len);
-
-void win32_get_video_output_prev(
-      unsigned *width, unsigned *height);
-
-void win32_get_video_output_next(
-      unsigned *width, unsigned *height);
-
 void win32_window_reset(void);
 
 void win32_destroy_window(void);
 
-bool win32_taskbar_is_created(void);
+uint8_t win32_get_flags(void);
 
-float win32_get_refresh_rate(void *data);
+/* Re-read the synchronous keyboard state and publish it as a
+ * RETROKMOD_* mask. Only valid on the thread owning the main window's
+ * message queue; use win32_get_keyboard_mods() everywhere else. */
+uint16_t win32_update_keyboard_mods(void);
+
+/* Returns the last mask published by win32_update_keyboard_mods().
+ * Safe from any thread. */
+uint16_t win32_get_keyboard_mods(void);
 
 #if defined(HAVE_D3D8) || defined(HAVE_D3D9) || defined (HAVE_D3D10) || defined (HAVE_D3D11) || defined (HAVE_D3D12)
 LRESULT CALLBACK wnd_proc_d3d_dinput(HWND hwnd, UINT message,
@@ -135,15 +155,6 @@ LRESULT CALLBACK wnd_proc_d3d_dinput(HWND hwnd, UINT message,
 LRESULT CALLBACK wnd_proc_d3d_winraw(HWND hwnd, UINT message,
       WPARAM wparam, LPARAM lparam);
 LRESULT CALLBACK wnd_proc_d3d_common(HWND hwnd, UINT message,
-      WPARAM wparam, LPARAM lparam);
-#endif
-
-#if defined(HAVE_OPENGL) || defined(HAVE_OPENGL1) || defined(HAVE_OPENGL_CORE)
-LRESULT CALLBACK wnd_proc_wgl_dinput(HWND hwnd, UINT message,
-      WPARAM wparam, LPARAM lparam);
-LRESULT CALLBACK wnd_proc_wgl_winraw(HWND hwnd, UINT message,
-      WPARAM wparam, LPARAM lparam);
-LRESULT CALLBACK wnd_proc_wgl_common(HWND hwnd, UINT message,
       WPARAM wparam, LPARAM lparam);
 #endif
 
@@ -156,26 +167,104 @@ LRESULT CALLBACK wnd_proc_vk_common(HWND hwnd, UINT message,
       WPARAM wparam, LPARAM lparam);
 #endif
 
+#if defined(HAVE_GDI)
 LRESULT CALLBACK wnd_proc_gdi_dinput(HWND hwnd, UINT message,
       WPARAM wparam, LPARAM lparam);
 LRESULT CALLBACK wnd_proc_gdi_winraw(HWND hwnd, UINT message,
       WPARAM wparam, LPARAM lparam);
 LRESULT CALLBACK wnd_proc_gdi_common(HWND hwnd, UINT message,
       WPARAM wparam, LPARAM lparam);
+#endif
 
 #ifdef _XBOX
 BOOL IsIconic(HWND hwnd);
 #endif
 
-bool win32_load_content_from_gui(const char *szFilename);
-
 void win32_setup_pixel_format(HDC hdc, bool supports_gl);
 
-void win32_unset_input_userdata(void);
+/* True when win32_setup_pixel_format selected an FP16 (scRGB) backbuffer
+ * for HDR output.  Always false unless HDR was requested, the display is
+ * in HDR mode, and the WGL float-pixel-format path succeeded; every
+ * failure falls back to the ordinary 8-bit pixel format, so pre-HDR
+ * setups behave exactly as before. */
+bool win32_backbuffer_is_scrgb(void);
 
-void win32_set_input_userdata(void *data);
+/* True when the display the window is on is currently in HDR mode.
+ * Probed through the dynamically-loaded DXGI helper; reports false in
+ * builds without a D3D driver or on systems without HDR. As a side
+ * effect of the underlying DXGI check, the video display HDR support
+ * flags are updated (set when supported; cleared -- and the HDR mode
+ * setting forced off -- when not). */
+bool win32_display_hdr_active(HWND hwnd);
 
-void win32_update_title(void);
+#if !defined(__WINRT__)
+/* Programmatic replacement for the menu, dialog, accelerator,
+ * and manifest resources that were in media/rarch.rc.
+ *
+ * The icon resource remains in rarch.rc (compiled by windres/rc)
+ * so that the .exe has an embedded icon visible in Explorer.
+ * Everything else is created at runtime via Win32 API calls. */
+
+/* Mark the process as DPI-aware (replaces the <dpiAware>true</dpiAware>
+ * entry that used to live in media/rarch.manifest).
+ *
+ * MUST be called before any HWND is created — directly or transitively
+ * (e.g. via CoInitialize or AllocConsole).  Call it at the very top of
+ * rarch_main(), before anything else.  Safe to call on any Windows
+ * version: falls back from SetProcessDpiAwareness (Win8.1+) to
+ * SetProcessDPIAware (Vista/7), and is a no-op on older systems. */
+void win32_apply_dpi_awareness(void);
+
+/* Call once before creating any windows.
+ * Creates the accelerator table and other programmatic resources. */
+void win32_resources_init(void);
+
+/* Release resources created by win32_resources_init(). */
+void win32_resources_free(void);
+
+/* Return the accelerator table
+ * (replaces LoadAccelerators + MAKEINTRESOURCE(IDR_ACCELERATOR1)). */
+HACCEL win32_resources_get_accelerator(void);
+#endif /* !__WINRT__ */
+
+#ifdef HAVE_D3DKMT
+#include <sdkddkver.h>
+#if !defined(NTDDI_VERSION) || NTDDI_VERSION < 0x06000000
+# undef NTDDI_VERSION
+# define NTDDI_VERSION 0x06000000   /* NTDDI_LONGHORN / Vista */
+#endif
+#if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0600
+# undef _WIN32_WINNT
+# define _WIN32_WINNT 0x0600
+#endif
+typedef LONG NTSTATUS;
+#define STATUS_SUCCESS ((NTSTATUS)0)
+#include <d3dkmthk.h>
+typedef NTSTATUS(CALLBACK* D3DKMTOPENADAPTERFROMHDC)(D3DKMT_OPENADAPTERFROMHDC*);
+static D3DKMTOPENADAPTERFROMHDC pD3DKMTOpenAdapterFromHdc;
+typedef NTSTATUS(CALLBACK* D3DKMTGETSCANLINE)(D3DKMT_GETSCANLINE*);
+static D3DKMTGETSCANLINE pD3DKMTGetScanLine;
+typedef NTSTATUS(CALLBACK* D3DKMTWAITFORVERTICALBLANKEVENT)(D3DKMT_WAITFORVERTICALBLANKEVENT*);
+static D3DKMTWAITFORVERTICALBLANKEVENT pD3DKMTWaitForVerticalBlankEvent;
+
+typedef struct d3dkmt_adapter
+{
+   D3DKMT_GETSCANLINE sl;
+   D3DKMT_WAITFORVERTICALBLANKEVENT vb;
+} d3dkmt_adapter_t;
+
+extern int d3dkmt_scanline_get(void);
+
+/* Block until the display signals vertical blank. Returns false when
+ * the entry point is unavailable or the wait fails, in which case the
+ * caller has no anchor and must fall back to polling.
+ *
+ * Measured on a 4K120 panel: 0 intervals outside +-20%% of the median
+ * across 499 samples, p1..p99 spread 30 us, period accurate to 0.02%%.
+ * That makes it a usable phase reference; GetScanLine at ~223 us a call
+ * is not. */
+extern bool d3dkmt_wait_vblank(void);
+#endif /* HAVE_D3DKMT */
 
 RETRO_END_DECLS
 

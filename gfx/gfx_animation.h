@@ -25,28 +25,23 @@
 
 #include "font_driver.h"
 
+#define TICKER_SPACER_DEFAULT "  |  "
+#define TICKER_SPEED          333333
+
+/* Pixel ticker nominally increases by one after each
+ * TICKER_PIXEL_PERIOD ms (actual increase depends upon
+ * ticker speed setting and display resolution)
+ *
+ * Formula is: (1.0f / 60.0f) * 1000.0f
+ * */
+#define TICKER_PIXEL_PERIOD (16.666666666666668f)
+
+#define ANIM_IS_ACTIVE(_p) (((_p)->flags & (GFX_ANIM_FLAG_IS_ACTIVE)) || ((_p)->flags & GFX_ANIM_FLAG_TICKER_IS_ACTIVE))
+
+#define GFX_ANIMATION_CLEAR_ACTIVE(anim) ((anim)->flags &= ~(GFX_ANIM_FLAG_IS_ACTIVE | GFX_ANIM_FLAG_TICKER_IS_ACTIVE))
+#define GFX_ANIMATION_SET_ACTIVE(anim) ((anim)->flags |= (GFX_ANIM_FLAG_IS_ACTIVE | GFX_ANIM_FLAG_TICKER_IS_ACTIVE))
+
 RETRO_BEGIN_DECLS
-
-#define TICKER_SPACER_DEFAULT "   |   "
-
-#define ANIM_IS_ACTIVE(_p) ((_p)->animation_is_active || (_p)->ticker_is_active)
-
-#define GFX_ANIMATION_CLEAR_ACTIVE(anim) \
-{ \
-   (anim)->animation_is_active = false; \
-   (anim)->ticker_is_active    = false; \
-}
-
-#define GFX_ANIMATION_SET_ACTIVE(anim) \
-{ \
-   (anim)->animation_is_active = true; \
-   (anim)->ticker_is_active    = true; \
-}
-
-typedef void  (*tween_cb)  (void*);
-
-typedef void (*update_time_cb) (float *ticker_pixel_increment,
-      unsigned width, unsigned height);
 
 enum gfx_animation_easing_type
 {
@@ -106,6 +101,19 @@ enum gfx_animation_ticker_type
    TICKER_TYPE_LAST
 };
 
+enum gfx_animation_flags
+{
+   GFX_ANIM_FLAG_PENDING_DELETES    = (1 << 0),
+   GFX_ANIM_FLAG_IN_UPDATE          = (1 << 1),
+   GFX_ANIM_FLAG_IS_ACTIVE          = (1 << 2),
+   GFX_ANIM_FLAG_TICKER_IS_ACTIVE   = (1 << 3)
+};
+
+typedef void  (*tween_cb)  (void*);
+
+typedef void (*update_time_cb) (float *ticker_pixel_increment,
+      unsigned width, unsigned height);
+
 typedef struct gfx_animation_ctx_entry
 {
    float *subject;
@@ -123,6 +131,13 @@ typedef struct gfx_animation_ctx_ticker
    char *s;
    const char *str;
    const char *spacer;
+   /* Size of the buffer @s points at, in BYTES.  Must be set; a
+    * ticker with s_len == 0 is rejected rather than guessed at.
+    * Distinct from @len below, and the distinction matters: one
+    * glyph of CJK or emoji is three or four bytes, so a string that
+    * fits @len glyphs can be several times @s_len bytes long. */
+   size_t s_len;
+   /* Width of the field to fit the string into, in GLYPHS. */
    size_t len;
    enum gfx_animation_ticker_type type_enum;
    bool selected;
@@ -134,7 +149,7 @@ typedef struct gfx_animation_ctx_ticker_smooth
    const char *src_str;
    const char *spacer;
    char *dst_str;
-   unsigned *dst_str_width; /* May be set to NULL 
+   unsigned *dst_str_width; /* May be set to NULL
                                (RGUI + XMB do not require this info) */
    unsigned *x_offset;
    font_data_t *font;
@@ -180,8 +195,6 @@ typedef struct gfx_animation_ctx_line_ticker_smooth
    bool fade_enabled;
 } gfx_animation_ctx_line_ticker_smooth_t;
 
-typedef float gfx_timer_t;
-
 typedef struct gfx_timer_ctx_entry
 {
    tween_cb cb;
@@ -192,7 +205,7 @@ typedef struct gfx_timer_ctx_entry
 typedef struct gfx_delayed_animation
 {
    gfx_animation_ctx_entry_t entry; /* pointer alignment */
-   gfx_timer_t timer;
+   float timer;
 } gfx_delayed_animation_t;
 
 typedef float (*easing_cb) (float, float, float, float);
@@ -203,8 +216,14 @@ struct tween
    tween_cb    cb;
    void        *userdata;
    uintptr_t   tag;
+   /* Timestamp (us) of the update frame on which the tween
+    * became live. Zero means 'not yet started' - the field is
+    * lazily initialised on the tween's first update frame
+    * (gfx_animation timestamps use zero as a sentinel, and
+    * the monotonic microsecond clock never legitimately
+    * returns it) */
+   retro_time_t start_time;
    float       duration;
-   float       running_since;
    float       initial_value;
    float       target_value;
    float       *subject;
@@ -226,15 +245,12 @@ struct gfx_animation
 
    float delta_time;
 
-   bool pending_deletes;
-   bool in_update;
-   bool animation_is_active;
-   bool ticker_is_active;
+   uint8_t flags;
 };
 
 typedef struct gfx_animation gfx_animation_t;
 
-void gfx_animation_timer_start(gfx_timer_t *timer,
+void gfx_animation_timer_start(float *timer,
       gfx_timer_ctx_entry_t *timer_entry);
 
 bool gfx_animation_update(
@@ -247,10 +263,6 @@ bool gfx_animation_update(
 bool gfx_animation_ticker(gfx_animation_ctx_ticker_t *ticker);
 
 bool gfx_animation_ticker_smooth(gfx_animation_ctx_ticker_smooth_t *ticker);
-
-bool gfx_animation_line_ticker(gfx_animation_ctx_line_ticker_t *line_ticker);
-
-bool gfx_animation_line_ticker_smooth(gfx_animation_ctx_line_ticker_smooth_t *line_ticker);
 
 bool gfx_animation_kill_by_tag(uintptr_t *tag);
 

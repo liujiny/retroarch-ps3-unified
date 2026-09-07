@@ -36,6 +36,9 @@
 
 typedef struct
 {
+   void (*upscale_256_320x192_240)(
+         uint16_t *PICOSCALE_restrict di, uint16_t ds,
+         const uint16_t *PICOSCALE_restrict si, uint16_t ss);
    void (*upscale_256_320x224_240)(
          uint16_t *PICOSCALE_restrict di, uint16_t ds,
          const uint16_t *PICOSCALE_restrict si, uint16_t ss);
@@ -60,10 +63,10 @@ struct softfilter_thread_data
 
 struct filter_data
 {
-   unsigned threads;
-   struct softfilter_thread_data *workers;
-   unsigned in_fmt;
    picoscale_functions_t functions;
+   struct softfilter_thread_data *workers;
+   unsigned threads;
+   unsigned in_fmt;
 };
 
 /*******************************************************************
@@ -104,7 +107,8 @@ scalers h:
 /* scale 4:5 */
 #define PICOSCALE_H_UPSCALE_SNN_4_5(di,ds,si,ss,w,f) do {    \
    uint16_t i;                                               \
-   for (i = w/4; i > 0; i--, si += 4, di += 5) {             \
+   for (i = w/4; i > 0; i--, si += 4, di += 5)               \
+   {                                                         \
       di[0] = f(si[0]);                                      \
       di[1] = f(si[1]);                                      \
       PICOSCALE_P_05(di[2], f(si[1]),f(si[2]));              \
@@ -117,7 +121,8 @@ scalers h:
 
 #define PICOSCALE_H_UPSCALE_BL2_4_5(di,ds,si,ss,w,f) do {    \
    uint16_t i;                                               \
-   for (i = w/4; i > 0; i--, si += 4, di += 5) {             \
+   for (i = w/4; i > 0; i--, si += 4, di += 5)               \
+   {                                                         \
       di[0] = f(si[0]);                                      \
       PICOSCALE_P_05(di[1], f(si[0]),f(si[1]));              \
       PICOSCALE_P_05(di[2], f(si[1]),f(si[2]));              \
@@ -130,7 +135,8 @@ scalers h:
 
 #define PICOSCALE_H_UPSCALE_BL4_4_5(di,ds,si,ss,w,f) do {    \
    uint16_t i, t; uint16_t p = f(si[0]);                     \
-   for (i = w/4; i > 0; i--, si += 4, di += 5) {             \
+   for (i = w/4; i > 0; i--, si += 4, di += 5)               \
+   {                                                         \
       PICOSCALE_P_025(di[0], p,       f(si[0]));             \
       PICOSCALE_P_05 (di[1], f(si[0]),f(si[1]));             \
       PICOSCALE_P_05 (di[2], f(si[1]),f(si[2]));             \
@@ -147,7 +153,8 @@ scalers v:
 
 #define PICOSCALE_V_MIX(di,li,ri,w,p_mix,f) do {    \
    uint16_t i, t, u; (void)t, (void)u;              \
-   for (i = 0; i < w; i += 4) {                     \
+   for (i = 0; i < w; i += 4)                       \
+   {                                                \
       p_mix((di)[i  ], f((li)[i  ]),f((ri)[i  ]));  \
       p_mix((di)[i+1], f((li)[i+1]),f((ri)[i+1]));  \
       p_mix((di)[i+2], f((li)[i+2]),f((ri)[i+2]));  \
@@ -220,6 +227,35 @@ void picoscale_upscale_rgb_snn_256_320x224_240(uint16_t *PICOSCALE_restrict di, 
    memset(di,      0, sizeof(uint16_t) * ds);
    memset(di + ds, 0, sizeof(uint16_t) * ds);
 }
+
+/* 256x192 -> 320x240, Fuse (ZX Spectrum) snn upscaler added by andymcca */
+void picoscale_upscale_rgb_snn_256_320x192_240(uint16_t *PICOSCALE_restrict di, uint16_t ds,
+      const uint16_t *PICOSCALE_restrict si, uint16_t ss)
+{
+   uint16_t y;
+
+   for (y = 0; y < 192; y += 4)  /* From 192 lines read 4 lines at a time, write 5 lines per loop, 5x48 = 240 */
+   {
+      /* First two lines */
+      PICOSCALE_H_UPSCALE_SNN_4_5(di, ds, si, ss, 256, PICOSCALE_F_NOP);
+      PICOSCALE_H_UPSCALE_SNN_4_5(di, ds, si, ss, 256, PICOSCALE_F_NOP);
+      /* Blank line */
+      di +=  ds;
+      /* Next two lines */
+      PICOSCALE_H_UPSCALE_SNN_4_5(di, ds, si, ss, 256, PICOSCALE_F_NOP);
+      PICOSCALE_H_UPSCALE_SNN_4_5(di, ds, si, ss, 256, PICOSCALE_F_NOP);
+
+      /* mix lines 2-4 */
+
+      di -= ds*3;
+      PICOSCALE_V_MIX(&di[0], &di[-ds], &di[ds], 320, PICOSCALE_P_05, PICOSCALE_F_NOP);
+      PICOSCALE_V_MIX(&di[-ds], &di[-2*ds], &di[-ds], 320, PICOSCALE_P_05, PICOSCALE_F_NOP);
+      PICOSCALE_V_MIX(&di[ ds], &di[ ds], &di[ 2*ds], 320, PICOSCALE_P_05, PICOSCALE_F_NOP);
+      di += ds*3;
+    }
+
+}
+
 
 void picoscale_upscale_rgb_bl2_256_320x224_240(uint16_t *PICOSCALE_restrict di, uint16_t ds,
       const uint16_t *PICOSCALE_restrict si, uint16_t ss)
@@ -328,6 +364,7 @@ static void picoscale_256x_320x240_initialize(struct filter_data *filt,
    char *filter_type = NULL;
 
    /* Assign default scaling functions */
+   filt->functions.upscale_256_320x192_240 = picoscale_upscale_rgb_snn_256_320x192_240;
    filt->functions.upscale_256_320x224_240 = picoscale_upscale_rgb_snn_256_320x224_240;
    filt->functions.upscale_256_320x___     = picoscale_upscale_rgb_snn_256_320x___;
 
@@ -356,22 +393,17 @@ static void *picoscale_256x_320x240_generic_create(const struct softfilter_confi
       unsigned threads, softfilter_simd_mask_t simd, void *userdata)
 {
    struct filter_data *filt = (struct filter_data*)calloc(1, sizeof(*filt));
-   (void)simd;
-   (void)config;
-   (void)userdata;
-
-   if (!filt) {
+   if (!filt)
+      return NULL;
+   if (!(filt->workers = (struct softfilter_thread_data*)calloc(1, sizeof(struct softfilter_thread_data))))
+   {
+      free(filt);
       return NULL;
    }
    /* Apparently the code is not thread-safe,
     * so force single threaded operation... */
-   filt->workers = (struct softfilter_thread_data*)calloc(1, sizeof(struct softfilter_thread_data));
    filt->threads = 1;
    filt->in_fmt  = in_fmt;
-   if (!filt->workers) {
-      free(filt);
-      return NULL;
-   }
 
    /* Assign scaling functions */
    picoscale_256x_320x240_initialize(filt, config, userdata);
@@ -383,8 +415,11 @@ static void picoscale_256x_320x240_generic_output(void *data,
       unsigned *out_width, unsigned *out_height,
       unsigned width, unsigned height)
 {
-   if ((width == 256) &&
-       ((height == 224) || (height == 240) || (height == 239)))
+   if (    (width  == 256)
+       && ((height == 224)
+       ||  (height == 240)
+       ||  (height == 192)
+       ||  (height == 239)))
    {
       *out_width  = 320;
       *out_height = 240;
@@ -399,9 +434,8 @@ static void picoscale_256x_320x240_generic_output(void *data,
 static void picoscale_256x_320x240_generic_destroy(void *data)
 {
    struct filter_data *filt = (struct filter_data*)data;
-   if (!filt) {
+   if (!filt)
       return;
-   }
    free(filt->workers);
    free(filt);
 }
@@ -424,6 +458,12 @@ static void picoscale_256x_320x240_work_cb_rgb565(void *data, void *thread_data)
          filt->functions.upscale_256_320x224_240(output, out_stride, input, in_stride);
          return;
       }
+      else if (height == 192)
+      {
+         filt->functions.upscale_256_320x192_240(output, out_stride, input, in_stride);
+         return;
+      }
+
       else if (height == 240)
       {
          filt->functions.upscale_256_320x___(output, out_stride, input, in_stride, 240);
@@ -470,20 +510,20 @@ static void picoscale_256x_320x240_generic_packets(void *data,
     * over threads and can cull some code. This only
     * makes the tiniest performance difference, but
     * every little helps when running on an o3DS... */
-   struct filter_data *filt = (struct filter_data*)data;
+   struct filter_data           *filt = (struct filter_data*)data;
    struct softfilter_thread_data *thr = (struct softfilter_thread_data*)&filt->workers[0];
 
-   thr->out_data = (uint8_t*)output;
-   thr->in_data = (const uint8_t*)input;
-   thr->out_pitch = output_stride;
-   thr->in_pitch = input_stride;
-   thr->width = width;
-   thr->height = height;
+   thr->out_data                      = (uint8_t*)output;
+   thr->in_data                       = (const uint8_t*)input;
+   thr->out_pitch                     = output_stride;
+   thr->in_pitch                      = input_stride;
+   thr->width                         = width;
+   thr->height                        = height;
 
-   if (filt->in_fmt == SOFTFILTER_FMT_RGB565) {
-      packets[0].work = picoscale_256x_320x240_work_cb_rgb565;
-   }
-   packets[0].thread_data = thr;
+   /* TODO/FIXME - no XRGB8888 codepath? */
+   if (filt->in_fmt == SOFTFILTER_FMT_RGB565)
+      packets[0].work                 = picoscale_256x_320x240_work_cb_rgb565;
+   packets[0].thread_data             = thr;
 }
 
 static const struct softfilter_implementation picoscale_256x_320x240_generic = {
@@ -505,7 +545,6 @@ static const struct softfilter_implementation picoscale_256x_320x240_generic = {
 const struct softfilter_implementation *softfilter_get_implementation(
       softfilter_simd_mask_t simd)
 {
-   (void)simd;
    return &picoscale_256x_320x240_generic;
 }
 

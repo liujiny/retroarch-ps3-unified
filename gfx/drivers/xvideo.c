@@ -55,38 +55,49 @@ typedef struct xv
    XShmSegmentInfo shminfo;
 
    XvPortID port;
-   int depth;
-   int visualid;
 
    XvImage *image;
-   uint32_t fourcc;
 
-   unsigned width;
-   unsigned height;
-   bool keep_aspect;
    struct video_viewport vp;
 
-   uint8_t *ytable;
-   uint8_t *utable;
-   uint8_t *vtable;
+   /* One entry per RGB565 colour. For packed (YUY2/UYVY) formats each
+    * entry already holds the complete 4-byte macropixel in destination
+    * byte order, so the render loops need a single load and two 32-bit
+    * stores instead of three loads and eight byte stores. For planar
+    * (YV12) formats the entry holds { y, u, v, 0 }. Built byte-wise, so
+    * no endianness fixups are required. */
+   uint32_t *yuv_table;
 
    void *font;
    const font_renderer_driver_t *font_driver;
 
-   unsigned luma_index[2];
-   unsigned chroma_u_index;
-   unsigned chroma_v_index;
-
-   uint8_t font_y;
-   uint8_t font_u;
-   uint8_t font_v;
-
-   void (*render_func)(struct xv*, const void *frame,
+   void (*render_func16)(struct xv*, const void *frame,
+         unsigned width, unsigned height, unsigned pitch);
+   void (*render_func32)(struct xv*, const void *frame,
          unsigned width, unsigned height, unsigned pitch);
 
    void (*render_glyph)(struct xv*, int base_x, int base_y,
 			const uint8_t *glyph, int atlas_width,
 			int glyph_width, int glyph_height);
+   int depth;
+   int visualid;
+   int fmt_format; /* XvPacked or XvPlanar */
+   unsigned luma_index[2];
+   unsigned chroma_u_index;
+   unsigned chroma_v_index;
+   unsigned width;
+   unsigned height;
+   uint32_t fourcc;
+   uint8_t font_y;
+   uint8_t font_u;
+   uint8_t font_v;
+   bool keep_aspect;
+
+   void *tex_frame;
+   unsigned tex_width;
+   unsigned tex_height;
+   unsigned tex_pitch;
+   unsigned tex_rgb32;
 } xv_t;
 
 static void xv_set_nonblock_state(void *data, bool state, bool c, unsigned d)
@@ -97,7 +108,7 @@ static void xv_set_nonblock_state(void *data, bool state, bool c, unsigned d)
    if (atom != None && xv->port)
       XvSetPortAttribute(g_x11_dpy, xv->port, atom, !state);
    else
-      RARCH_WARN("Failed to set SYNC_TO_VBLANK attribute.\n");
+      RARCH_WARN("[XVideo] Failed to set SYNC_TO_VBLANK attribute.\n");
 }
 
 static INLINE void xv_calculate_yuv(uint8_t *y, uint8_t *u, uint8_t *v,
@@ -111,19 +122,23 @@ static INLINE void xv_calculate_yuv(uint8_t *y, uint8_t *u, uint8_t *v,
          - ((double)b * 0.071) + 128.0);
 
    *y     = y_ < 0 ? 0 : (y_ > 255 ? 255 : y_);
-   *u     = y_ < 0 ? 0 : (u_ > 255 ? 255 : u_);
+   *u     = u_ < 0 ? 0 : (u_ > 255 ? 255 : u_);
    *v     = v_ < 0 ? 0 : (v_ > 255 ? 255 : v_);
 }
 
 static void xv_init_yuv_tables(xv_t *xv)
 {
    unsigned i;
-   xv->ytable = (uint8_t*)malloc(0x10000);
-   xv->utable = (uint8_t*)malloc(0x10000);
-   xv->vtable = (uint8_t*)malloc(0x10000);
+   uint8_t *entry;
 
-   for (i = 0; i < 0x10000; i++)
+   if (!(xv->yuv_table = (uint32_t*)calloc(0x10000, sizeof(uint32_t))))
+      return;
+
+   entry = (uint8_t*)xv->yuv_table;
+
+   for (i = 0; i < 0x10000; i++, entry += 4)
    {
+      uint8_t  y, u, v;
       /* Extract RGB565 color data from i */
       unsigned r = (i >> 11) & 0x1f;
       unsigned g = (i >> 5)  & 0x3f;
@@ -132,8 +147,24 @@ static void xv_init_yuv_tables(xv_t *xv)
       g          = (g << 2) | (g >> 4);  /* G6->G8 */
       b          = (b << 3) | (b >> 2);  /* B5->B8 */
 
-      xv_calculate_yuv(&xv->ytable[i],
-            &xv->utable[i], &xv->vtable[i], r, g, b);
+      xv_calculate_yuv(&y, &u, &v, r, g, b);
+
+      if (xv->fmt_format == XvPlanar)
+      {
+         entry[0] = y;
+         entry[1] = u;
+         entry[2] = v;
+      }
+      else
+      {
+         /* Pre-assemble the destination macropixel: both luma slots
+          * carry the same sample, chroma goes where the adaptor wants
+          * it. Covers YUY2 ({0,2}/1/3) and UYVY ({1,3}/0/2) alike. */
+         entry[xv->luma_index[0]] = y;
+         entry[xv->luma_index[1]] = y;
+         entry[xv->chroma_u_index] = u;
+         entry[xv->chroma_v_index] = v;
+      }
    }
 }
 
@@ -154,7 +185,7 @@ static void xv_init_font(xv_t *xv, const char *font_path, unsigned font_size)
             &xv->font_driver,
             &xv->font, *path_font
             ? path_font : NULL,
-            video_font_size))
+            video_font_size, FONT_ATLAS_FORMAT_A8))
    {
       int r = msg_color_r * 255;
       int g = msg_color_g * 255;
@@ -167,33 +198,27 @@ static void xv_init_font(xv_t *xv, const char *font_path, unsigned font_size)
             r, g, b);
    }
    else
-      RARCH_LOG("[XVideo]: Could not initialize fonts.\n");
+      RARCH_LOG("[XVideo] Could not initialize fonts.\n");
 }
 
 /* We render @ 2x scale to combat chroma downsampling.
  * Also makes fonts more bearable. */
-static void render16_yuy2(xv_t *xv, const void *input_,
+static void render16_packed(xv_t *xv, const void *input_,
       unsigned width, unsigned height, unsigned pitch)
 {
    unsigned x, y;
-   const uint16_t *input = (const uint16_t*)input_;
-   uint8_t *output       = (uint8_t*)xv->image->data;
+   const uint16_t *input    = (const uint16_t*)input_;
+   uint8_t *output          = (uint8_t*)xv->image->data;
+   const uint32_t *tbl      = xv->yuv_table;
+   const unsigned img_width = xv->width << 1;
 
    for (y = 0; y < height; y++)
    {
       for (x = 0; x < width; x++)
       {
-         uint16_t p         = *input++;
-         uint8_t y0         = xv->ytable[p];
-         uint8_t u          = xv->utable[p];
-         uint8_t v          = xv->vtable[p];
-
-         unsigned img_width = xv->width << 1;
-
-         output[0] = output[img_width]     = y0;
-         output[1] = output[img_width + 1] = u;
-         output[2] = output[img_width + 2] = y0;
-         output[3] = output[img_width + 3] = v;
+         uint32_t t = tbl[*input++];
+         memcpy(output, &t, sizeof(t));
+         memcpy(output + img_width, &t, sizeof(t));
          output += 4;
       }
 
@@ -202,95 +227,26 @@ static void render16_yuy2(xv_t *xv, const void *input_,
    }
 }
 
-static void render16_uyvy(xv_t *xv, const void *input_,
+static void render32_packed(xv_t *xv, const void *input_,
       unsigned width, unsigned height, unsigned pitch)
 {
    unsigned x, y;
-   const uint16_t *input = (const uint16_t*)input_;
-   uint8_t       *output = (uint8_t*)xv->image->data;
+   const uint32_t *input    = (const uint32_t*)input_;
+   uint8_t *output          = (uint8_t*)xv->image->data;
+   const uint32_t *tbl      = xv->yuv_table;
+   const unsigned img_width = xv->width << 1;
 
    for (y = 0; y < height; y++)
    {
       for (x = 0; x < width; x++)
       {
-         uint16_t p         = *input++;
-         uint8_t y0         = xv->ytable[p];
-         uint8_t u          = xv->utable[p];
-         uint8_t v          = xv->vtable[p];
-         unsigned img_width = xv->width << 1;
-
-         output[0] = output[img_width]     = u;
-         output[1] = output[img_width + 1] = y0;
-         output[2] = output[img_width + 2] = v;
-         output[3] = output[img_width + 3] = y0;
-         output += 4;
-      }
-
-      input  += (pitch >> 1) - width;
-      output += (xv->width - width) << 2;
-   }
-}
-
-static void render32_yuy2(xv_t *xv, const void *input_,
-      unsigned width, unsigned height, unsigned pitch)
-{
-   unsigned x, y;
-   const uint32_t *input = (const uint32_t*)input_;
-   uint8_t *output       = (uint8_t*)xv->image->data;
-
-   for (y = 0; y < height; y++)
-   {
-      for (x = 0; x < width; x++)
-      {
-         uint8_t y0, u, v;
-         unsigned img_width;
          uint32_t p = *input++;
+         uint32_t t;
          p = ((p >> 8) & 0xf800) | ((p >> 5) & 0x07e0)
             | ((p >> 3) & 0x1f); /* ARGB -> RGB16 */
-
-         y0        = xv->ytable[p];
-         u         = xv->utable[p];
-         v         = xv->vtable[p];
-
-         img_width = xv->width << 1;
-         output[0] = output[img_width] = y0;
-         output[1] = output[img_width + 1] = u;
-         output[2] = output[img_width + 2] = y0;
-         output[3] = output[img_width + 3] = v;
-         output += 4;
-      }
-
-      input  += (pitch >> 2) - width;
-      output += (xv->width - width) << 2;
-   }
-}
-
-static void render32_uyvy(xv_t *xv, const void *input_,
-      unsigned width, unsigned height, unsigned pitch)
-{
-   unsigned x, y;
-   const uint32_t *input = (const uint32_t*)input_;
-   uint16_t *output      = (uint16_t*)xv->image->data;
-
-   for (y = 0; y < height; y++)
-   {
-      for (x = 0; x < width; x++)
-      {
-         uint8_t y0, u, v;
-         unsigned img_width;
-         uint32_t p = *input++;
-         p = ((p >> 8) & 0xf800)
-            | ((p >> 5) & 0x07e0) | ((p >> 3) & 0x1f); /* ARGB -> RGB16 */
-
-         y0        = xv->ytable[p];
-         u         = xv->utable[p];
-         v         = xv->vtable[p];
-
-         img_width = xv->width << 1;
-         output[0] = output[img_width] = u;
-         output[1] = output[img_width + 1] = y0;
-         output[2] = output[img_width + 2] = v;
-         output[3] = output[img_width + 3] = y0;
+         t = tbl[p];
+         memcpy(output, &t, sizeof(t));
+         memcpy(output + img_width, &t, sizeof(t));
          output += 4;
       }
 
@@ -304,6 +260,8 @@ static void render32_yuv12(xv_t *xv, const void *input_,
 {
    unsigned x, y;
    const uint32_t *input = (const uint32_t*)input_;
+   const uint32_t *tbl   = xv->yuv_table;
+   const uint8_t *e;
    unsigned w0 = xv->width >> 1;
    unsigned w1 = w0 << 1;
    unsigned h0 = xv->height >> 1;
@@ -321,9 +279,10 @@ static void render32_yuv12(xv_t *xv, const void *input_,
          p = ((p >> 8) & 0xf800) | ((p >> 5) & 0x07e0)
             | ((p >> 3) & 0x1f); /* ARGB -> RGB16 */
 
-         y0        = xv->ytable[p];
-         u         = xv->utable[p];
-         v         = xv->vtable[p];
+         e         = (const uint8_t*)&tbl[p];
+         y0        = e[0];
+         u         = e[1];
+         v         = e[2];
 
          output[0] = output[w1] = y0;
 	 output[1] = output[w1+1] = y0;
@@ -344,6 +303,7 @@ static void render16_yuv12(xv_t *xv, const void *input_,
 {
    unsigned x, y;
    const uint16_t *input = (const uint16_t*)input_;
+   const uint32_t *tbl   = xv->yuv_table;
    unsigned w0 = xv->width >> 1;
    unsigned w1 = w0 << 1;
    unsigned h0 = xv->height >> 1;
@@ -355,10 +315,11 @@ static void render16_yuv12(xv_t *xv, const void *input_,
    {
       for (x = 0; x < width; x++)
       {
-	 uint16_t p         = *input++;
-         uint8_t y0         = xv->ytable[p];
-         uint8_t u          = xv->utable[p];
-         uint8_t v          = xv->vtable[p];
+         uint16_t p         = *input++;
+         const uint8_t *e   = (const uint8_t*)&tbl[p];
+         uint8_t y0         = e[0];
+         uint8_t u          = e[1];
+         uint8_t v          = e[2];
 
          output[0] = output[w1] = y0;
 	 output[1] = output[w1+1] = y0;
@@ -504,8 +465,8 @@ struct format_desc
 
 static const struct format_desc formats[] = {
    {
-      render16_yuy2,
-      render32_yuy2,
+      render16_packed,
+      render32_packed,
       render_glyph_yuv_packed,
       { 'Y', 'U', 'Y', 'V' },
       { 0, 2 },
@@ -515,8 +476,8 @@ static const struct format_desc formats[] = {
       XvPacked
    },
    {
-      render16_uyvy,
-      render32_uyvy,
+      render16_packed,
+      render32_packed,
       render_glyph_yuv_packed,
       { 'U', 'Y', 'V', 'Y' },
       { 1, 3 },
@@ -564,9 +525,10 @@ static bool xv_adaptor_set_format(xv_t *xv, Display *dpy,
                   format[i].component_order[3] == formats[j].components[3])
             {
                xv->fourcc         = format[i].id;
-               xv->render_func    = video->rgb32
-                  ? formats[j].render_32 : formats[j].render_16;
-               xv->render_glyph    = formats[j].render_glyph;
+               xv->fmt_format     = formats[j].format;
+               xv->render_func16  = formats[j].render_16;
+               xv->render_func32  = formats[j].render_32;
+               xv->render_glyph   = formats[j].render_glyph;
 
                xv->luma_index[0]  = formats[j].luma_index[0];
                xv->luma_index[1]  = formats[j].luma_index[1];
@@ -587,55 +549,9 @@ static void xv_calc_out_rect(bool keep_aspect,
       struct video_viewport *vp,
       unsigned vp_width, unsigned vp_height)
 {
-   settings_t *settings = config_get_ptr();
-   bool scale_integer   = settings->bools.video_scale_integer;
-
-   vp->full_width       = vp_width;
-   vp->full_height      = vp_height;
-
-   if (scale_integer)
-      video_viewport_get_scaled_integer(vp, vp_width, vp_height,
-            video_driver_get_aspect_ratio(), keep_aspect);
-   else if (!keep_aspect)
-   {
-      vp->x      = 0;
-      vp->y      = 0;
-      vp->width  = vp_width;
-      vp->height = vp_height;
-   }
-   else
-   {
-      float desired_aspect = video_driver_get_aspect_ratio();
-      float device_aspect  = (float)vp_width / vp_height;
-
-      /* If the aspect ratios of screen and desired aspect ratio
-       * are sufficiently equal (floating point stuff),
-       * assume they are actually equal.
-       */
-      if (fabs(device_aspect - desired_aspect) < 0.0001)
-      {
-         vp->x       = 0;
-         vp->y       = 0;
-         vp->width   = vp_width;
-         vp->height  = vp_height;
-      }
-      else if (device_aspect > desired_aspect)
-      {
-         float delta = (desired_aspect / device_aspect - 1.0) / 2.0 + 0.5;
-         vp->x       = vp_width * (0.5 - delta);
-         vp->y       = 0;
-         vp->width   = 2.0 * vp_width * delta;
-         vp->height  = vp_height;
-      }
-      else
-      {
-         float delta = (device_aspect / desired_aspect - 1.0) / 2.0 + 0.5;
-         vp->x       = 0;
-         vp->y       = vp_height * (0.5 - delta);
-         vp->width   = vp_width;
-         vp->height  = 2.0 * vp_height * delta;
-      }
-   }
+   vp->full_width  = vp_width;
+   vp->full_height = vp_height;
+   video_driver_update_viewport(vp, false, keep_aspect, true);
 }
 
 static void *xv_init(const video_info_t *video,
@@ -643,6 +559,7 @@ static void *xv_init(const video_info_t *video,
 {
    unsigned i;
    int ret;
+   XEvent event;
    XWindowAttributes target;
    char title[128]                        = {0};
    XSetWindowAttributes attributes        = {0};
@@ -656,7 +573,8 @@ static void *xv_init(const video_info_t *video,
    XVisualInfo *visualinfo                = NULL;
    XvAdaptorInfo *adaptor_info            = NULL;
    const struct retro_game_geometry *geom = NULL;
-   struct retro_system_av_info *av_info   = NULL;
+   video_driver_state_t *video_st         = video_state_get_ptr();
+   struct retro_system_av_info *av_info   = &video_st->av_info;
    settings_t *settings                   = config_get_ptr();
    bool video_disable_composition         = settings->bools.video_disable_composition;
    xv_t                               *xv = (xv_t*)calloc(1, sizeof(*xv));
@@ -669,19 +587,17 @@ static void *xv_init(const video_info_t *video,
 
    if (!g_x11_dpy)
    {
-      RARCH_ERR("[XVideo]: Cannot connect to the X server.\n");
-      RARCH_ERR("[XVideo]: Check DISPLAY variable and if X is running.\n");
+      RARCH_ERR("[XVideo] Cannot connect to the X server.\n");
+      RARCH_ERR("[XVideo] Check DISPLAY variable and if X is running.\n");
       goto error;
    }
-
-   av_info = video_viewport_get_system_av_info();
 
    if (av_info)
       geom        = &av_info->geometry;
 
    if (!XShmQueryExtension(g_x11_dpy))
    {
-      RARCH_ERR("[XVideo]: XShm extension not found.\n");
+      RARCH_ERR("[XVideo] XShm extension not found.\n");
       goto error;
    }
 
@@ -695,18 +611,18 @@ static void *xv_init(const video_info_t *video,
    if (ret != Success)
    {
       if (ret == XvBadExtension)
-         RARCH_ERR("[XVideo]: Xv extension not found.\n");
+         RARCH_ERR("[XVideo] Xv extension not found.\n");
       else if (ret == XvBadAlloc)
-         RARCH_ERR("[XVideo]: XvQueryAdaptors() failed to allocate memory.\n");
+         RARCH_ERR("[XVideo] XvQueryAdaptors() failed to allocate memory.\n");
       else
-         RARCH_ERR("[XVideo]: Unkown error in XvQueryAdaptors().\n");
+         RARCH_ERR("[XVideo] Unknown error in XvQueryAdaptors().\n");
 
       goto error;
    }
 
    if (adaptor_count == 0)
    {
-      RARCH_ERR("[XVideo]: XvQueryAdaptors() found 0 adaptors.\n");
+      RARCH_ERR("[XVideo] XvQueryAdaptors() found 0 adaptors.\n");
       goto error;
    }
 
@@ -729,14 +645,14 @@ static void *xv_init(const video_info_t *video,
       xv->depth    = adaptor_info[i].formats->depth;
       xv->visualid = adaptor_info[i].formats->visual_id;
 
-      RARCH_LOG("[XVideo]: Found suitable XvPort #%u\n", (unsigned)xv->port);
+      RARCH_LOG("[XVideo] Found suitable XvPort #%u.\n", (unsigned)xv->port);
       break;
    }
    XvFreeAdaptorInfo(adaptor_info);
 
    if (xv->port == 0)
    {
-      RARCH_ERR("[XVideo]: Failed to find valid XvPort or format.\n");
+      RARCH_ERR("[XVideo] Failed to find valid XvPort or format.\n");
       goto error;
    }
 
@@ -752,7 +668,7 @@ static void *xv_init(const video_info_t *video,
 
    if (visualmatches < 1 || !visualinfo->visual)
    {
-      RARCH_ERR("[XVideo]: Unable to find Xv-compatible visual.\n");
+      RARCH_ERR("[XVideo] Unable to find Xv-compatible visual.\n");
       goto error;
    }
 
@@ -782,6 +698,13 @@ static void *xv_init(const video_info_t *video,
    XFree(visualinfo);
    XSetWindowBackground(g_x11_dpy, g_x11_win, 0);
 
+   if (video->fullscreen)
+   {
+      /* Give the window a fullscreen hint before it is shown.
+       * This helps GNOME + X11 enter fullscreen properly */
+      x11_set_net_wm_fullscreen_hint(g_x11_dpy, g_x11_win);
+   }
+
    if (video->fullscreen && video_disable_composition)
    {
       uint32_t value = 1;
@@ -789,7 +712,7 @@ static void *xv_init(const video_info_t *video,
       Atom net_wm_bypass_compositor = XInternAtom(g_x11_dpy,
             "_NET_WM_BYPASS_COMPOSITOR", False);
 
-      RARCH_LOG("[XVideo]: Requesting compositor bypass.\n");
+      RARCH_LOG("[XVideo] Requesting compositor bypass.\n");
       XChangeProperty(g_x11_dpy, g_x11_win,
             net_wm_bypass_compositor, cardinal, 32,
             PropModeReplace, (const unsigned char*)&value, 1);
@@ -806,8 +729,13 @@ static void *xv_init(const video_info_t *video,
 
    if (video->fullscreen)
    {
+      /* Ask for fullscreen again after the window is visible. Some
+       * GNOME + X11 setups ignore the first request if it happens too
+       * early, which causes RetroArch to only maximise the window */
+      x11_event_queue_check(&event);
       x11_set_net_wm_fullscreen(g_x11_dpy, g_x11_win);
-      x11_show_mouse(g_x11_dpy, g_x11_win, false);
+      XFlush(g_x11_dpy);
+      x11_show_mouse(xv, false);
    }
 
    xv->gc = XCreateGC(g_x11_dpy, g_x11_win, 0, 0);
@@ -828,7 +756,7 @@ static void *xv_init(const video_info_t *video,
 
    if (!xv->image)
    {
-      RARCH_ERR("[XVideo]: XShmCreateImage failed.\n");
+      RARCH_ERR("[XVideo] XShmCreateImage failed.\n");
       goto error;
    }
 
@@ -840,7 +768,7 @@ static void *xv_init(const video_info_t *video,
 
    if (!XShmAttach(g_x11_dpy, &xv->shminfo))
    {
-      RARCH_ERR("[XVideo]: XShmAttach failed.\n");
+      RARCH_ERR("[XVideo] XShmAttach failed.\n");
       goto error;
    }
    XSync(g_x11_dpy, False);
@@ -902,7 +830,7 @@ static bool xv_check_resize(xv_t *xv, unsigned width, unsigned height)
 
       if (xv->image == None)
       {
-         RARCH_ERR("[XVideo]: Failed to create image.\n");
+         RARCH_ERR("[XVideo] Failed to create image.\n");
          return false;
       }
 
@@ -914,7 +842,7 @@ static bool xv_check_resize(xv_t *xv, unsigned width, unsigned height)
 
       if (xv->shminfo.shmid < 0)
       {
-         RARCH_ERR("[XVideo]: Failed to init SHM.\n");
+         RARCH_ERR("[XVideo] Failed to init SHM.\n");
          return false;
       }
 
@@ -924,7 +852,7 @@ static bool xv_check_resize(xv_t *xv, unsigned width, unsigned height)
 
       if (!XShmAttach(g_x11_dpy, &xv->shminfo))
       {
-         RARCH_ERR("[XVideo]: Failed to reattch XvShm image.\n");
+         RARCH_ERR("[XVideo] Failed to reattch XvShm image.\n");
          return false;
       }
       XSync(g_x11_dpy, False);
@@ -1011,8 +939,20 @@ static bool xv_frame(void *data, const void *frame, unsigned width,
 {
    XWindowAttributes target;
    xv_t *xv                  = (xv_t*)data;
+   bool rgb32                = (video_info->video_st_flags & VIDEO_FLAG_USE_RGBA) ? true : false;
 #ifdef HAVE_MENU
-   bool menu_is_alive        = video_info->menu_is_alive;
+   bool menu_is_alive        = (video_info->menu_st_flags & MENU_ST_FLAG_ALIVE) ? true : false;
+
+   menu_driver_frame(menu_is_alive, video_info);
+
+   if (menu_is_alive && xv->tex_frame)
+   {
+      frame  = xv->tex_frame;
+      width  = xv->tex_width;
+      height = xv->tex_height;
+      pitch  = xv->tex_pitch;
+      rgb32  = xv->tex_rgb32;
+   }
 #endif
 
    if (!frame)
@@ -1022,15 +962,15 @@ static bool xv_frame(void *data, const void *frame, unsigned width,
       return false;
 
    XGetWindowAttributes(g_x11_dpy, g_x11_win, &target);
-   xv->render_func(xv, frame, width, height, pitch);
+
+   if (rgb32)
+      xv->render_func32(xv, frame, width, height, pitch);
+   else
+      xv->render_func16(xv, frame, width, height, pitch);
 
    xv_calc_out_rect(xv->keep_aspect, &xv->vp, target.width, target.height);
    xv->vp.full_width  = target.width;
    xv->vp.full_height = target.height;
-
-#ifdef HAVE_MENU
-   menu_driver_frame(menu_is_alive, video_info);
-#endif
 
    if (msg)
       xv_render_msg(xv, msg, width << 1, height << 1);
@@ -1043,15 +983,6 @@ static bool xv_frame(void *data, const void *frame, unsigned width,
 
    x11_update_title(NULL);
 
-   return true;
-}
-
-static bool xv_suppress_screensaver(void *data, bool enable)
-{
-   if (video_driver_display_type_get() != RARCH_DISPLAY_X11)
-      return false;
-
-   x11_suspend_screensaver(video_driver_window_get(), enable);
    return true;
 }
 
@@ -1076,9 +1007,7 @@ static void xv_free(void *data)
 
    XCloseDisplay(g_x11_dpy);
 
-   free(xv->ytable);
-   free(xv->utable);
-   free(xv->vtable);
+   free(xv->yuv_table);
 
    if (xv->font)
       xv->font_driver->free(xv->font);
@@ -1092,30 +1021,54 @@ static void xv_viewport_info(void *data, struct video_viewport *vp)
    *vp = xv->vp;
 }
 
-static uint32_t xv_get_flags(void *data) { return 0; }
+static uint32_t xv_poke_get_flags(void *data)
+{
+   return 0;
+}
+
+static void xv_poke_set_texture_frame(void *data,
+      const void *frame, bool rgb32,
+      unsigned width, unsigned height, float alpha)
+{
+   xv_t *xv  = (xv_t*)data;
+   xv->tex_frame = (void*)frame;
+   xv->tex_rgb32 = rgb32;
+   xv->tex_width = width;
+   xv->tex_height = height;
+   xv->tex_pitch = width * (rgb32 ? 4 : 2);
+}
 
 static video_poke_interface_t xv_video_poke_interface = {
-   xv_get_flags,
-   NULL,
-   NULL,
-   NULL,
+   xv_poke_get_flags,
+   NULL, /* load_texture */
+   NULL, /* unload_texture */
+   NULL, /* set_video_mode */
+#ifdef HAVE_XF86VM
    x11_get_refresh_rate,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL,
-   NULL
+#else
+   NULL, /* get_refresh_rate */
+#endif
+   NULL, /* set_filtering */
+   NULL, /* get_video_output_size */
+   NULL, /* get_video_output_prev */
+   NULL, /* get_video_output_next */
+   NULL, /* get_current_framebuffer */
+   NULL, /* get_proc_address */
+   NULL, /* set_aspect_ratio */
+   NULL, /* apply_state_changes */
+   xv_poke_set_texture_frame,
+   NULL, /* set_texture_enable */
+   NULL, /* set_osd_msg */
+   NULL, /* show_mouse */
+   NULL, /* grab_mouse_toggle */
+   NULL, /* get_current_shader */
+   NULL, /* get_current_software_framebuffer */
+   NULL, /* get_hw_render_interface */
+   NULL, /* set_hdr_menu_nits */
+   NULL, /* set_hdr_paper_white_nits */
+   NULL, /* set_hdr_expand_gamut */
+   NULL, /* set_hdr_scanlines */
+   NULL  /* set_hdr_subpixel_layout */
 };
 
 static void xv_get_poke_interface(void *data,
@@ -1141,7 +1094,7 @@ video_driver_t video_xvideo = {
    xv_set_nonblock_state,
    x11_alive,
    x11_has_focus_internal,
-   xv_suppress_screensaver,
+   x11_suspend_screensaver,
    xv_has_windowed,
    xv_set_shader,
    xv_free,
@@ -1152,10 +1105,13 @@ video_driver_t video_xvideo = {
    NULL, /* read_viewport */
    NULL, /* read_frame_raw */
 #ifdef HAVE_OVERLAY
-  NULL, /* overlay_interface */
+   NULL, /* get_overlay_interface */
 #endif
-#ifdef HAVE_VIDEO_LAYOUT
-  NULL,
+   xv_get_poke_interface,
+   NULL, /* wrap_type_to_enum */
+   NULL, /* shader_load_begin */
+   NULL, /* shader_load_step */
+#ifdef HAVE_GFX_WIDGETS
+   NULL  /* gfx_widgets_enabled */
 #endif
-  xv_get_poke_interface
 };
