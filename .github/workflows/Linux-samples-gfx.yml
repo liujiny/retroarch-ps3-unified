@@ -43,7 +43,7 @@ jobs:
             $pkgs
 
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: Video modeline engine goldens and C89 lane
         shell: bash

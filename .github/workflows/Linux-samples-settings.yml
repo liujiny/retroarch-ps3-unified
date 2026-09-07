@@ -41,7 +41,7 @@ jobs:
             $pkgs
 
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v7
 
       - name: Build and run pipeline_migration_test (ASan + UBSan)
         shell: bash
