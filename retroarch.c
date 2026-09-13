@@ -60,6 +60,10 @@
 #include <math.h>
 #include <locale.h>
 
+#ifdef __CELLOS_LV2__
+#include <sys/memory.h>
+#endif
+
 #include <boolean.h>
 #include <clamping.h>
 #include <string/stdstring.h>
@@ -196,6 +200,48 @@
 #include "file_path_special.h"
 #include "ui/ui_companion_driver.h"
 #include "verbosity.h"
+
+#ifdef __CELLOS_LV2__
+static size_t ps3_ra_mem_previous_available;
+static bool ps3_ra_mem_previous_valid;
+
+static void ps3_ra_mem_trace(const char *stage)
+{
+   sys_memory_info_t info;
+   int rc = sys_memory_get_user_memory_size(&info);
+   if (rc != 0)
+   {
+      RARCH_LOG("[PS3 RA MEM] stage=%s query_failed=%d\n", stage, rc);
+      return;
+   }
+
+   if (ps3_ra_mem_previous_valid)
+   {
+      int64_t delta = (int64_t)info.available_user_memory - (int64_t)ps3_ra_mem_previous_available;
+      RARCH_LOG("[PS3 RA MEM] stage=%s total=%llu available=%llu delta=%lld\n",
+            stage, (unsigned long long)info.total_user_memory,
+            (unsigned long long)info.available_user_memory, (long long)delta);
+      if (delta <= -(8LL * 1024 * 1024))
+      {
+         RARCH_LOG("[PS3 RA MEM LARGE DROP] stage=%s previous=%u current=%u delta=%lld\n",
+               stage, (unsigned long long)ps3_ra_mem_previous_available,
+               (unsigned long long)info.available_user_memory, (long long)delta);
+         if (delta >= -(33LL * 1024 * 1024) && delta <= -(31LL * 1024 * 1024))
+            RARCH_LOG("[PS3 RA MEM POSSIBLE 32M EVENT] stage=%s delta=%lld\n",
+                  stage, (long long)delta);
+      }
+   }
+   else
+      RARCH_LOG("[PS3 RA MEM] stage=%s total=%u available=%u delta=0\n",
+            stage, (unsigned long long)info.total_user_memory,
+            (unsigned long long)info.available_user_memory);
+
+   ps3_ra_mem_previous_available = info.available_user_memory;
+   ps3_ra_mem_previous_valid = true;
+}
+#else
+static void ps3_ra_mem_trace(const char *stage) { (void)stage; }
+#endif
 
 #include "gfx/video_driver.h"
 #include "gfx/video_display_server.h"
@@ -1586,6 +1632,7 @@ void drivers_init(
       enum driver_lifetime_flags lifetime_flags,
       bool verbosity_enabled)
 {
+   ps3_ra_mem_trace("before_frontend_driver_init");
    runloop_state_t *runloop_st       = runloop_state_get_ptr();
    audio_driver_state_t *audio_st    = audio_state_get_ptr();
    input_driver_state_t *input_st    = input_state_get_ptr();
@@ -1636,6 +1683,7 @@ void drivers_init(
       if (!video_driver_init_internal(&video_is_threaded,
                verbosity_enabled))
          retroarch_fail(1, "video_driver_init_internal()");
+      ps3_ra_mem_trace("after_video_init");
 
       if (   !video_driver_cache_context_ack_test()
             && hwr->context_reset)
@@ -1688,6 +1736,7 @@ void drivers_init(
       /* Whether or not init succeeded: the list is how the user gets
        * out of a failed device choice. */
       audio_driver_refresh_devices_list();
+      ps3_ra_mem_trace("after_audio_init");
    }
 
 #ifdef HAVE_MICROPHONE
@@ -1804,6 +1853,7 @@ void drivers_init(
       {
          if (!menu_driver_init(video_is_threaded))
              RARCH_ERR("Unable to init menu driver.\n");
+         ps3_ra_mem_trace("after_menu_init");
 
 #ifdef HAVE_LIBRETRODB
          menu_explore_context_init();
@@ -6466,6 +6516,7 @@ static int mkdir_p(const char *path, mode_t mode)
  **/
 int rarch_main(int argc, char *argv[], void *data)
 {
+   ps3_ra_mem_trace("main_entry");
    settings_t *settings;
    struct rarch_state *p_rarch         = &rarch_st;
    runloop_state_t *runloop_st         = runloop_state_get_ptr();

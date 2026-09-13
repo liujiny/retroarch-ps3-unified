@@ -4384,7 +4384,9 @@ static bool core_unload_game(void)
    if ((runloop_st->current_core.flags & RETRO_CORE_FLAG_GAME_LOADED))
    {
       RARCH_LOG("[Core] Unloading game...\n");
+      ps3_ra_mem_trace("before_retro_unload_game");
       runloop_st->current_core.retro_unload_game();
+      ps3_ra_mem_trace("after_retro_unload_game");
       runloop_st->core_poll_type_override  = POLL_TYPE_OVERRIDE_DONTCARE;
       runloop_st->current_core.flags      &= ~RETRO_CORE_FLAG_GAME_LOADED;
    }
@@ -4530,7 +4532,9 @@ void runloop_event_deinit_core(void)
    if (runloop_st->current_core.flags & RETRO_CORE_FLAG_INITED)
    {
       RARCH_LOG("[Core] Unloading core...\n");
+      ps3_ra_mem_trace("before_retro_deinit");
       runloop_st->current_core.retro_deinit();
+      ps3_ra_mem_trace("after_retro_deinit");
 #if TARGET_OS_IPHONE
       exec_mem_ledger_free_all();
 #endif
@@ -4552,7 +4556,9 @@ void runloop_event_deinit_core(void)
    }
 
    RARCH_LOG("[Core] Unloading core symbols...\n");
+   ps3_ra_mem_trace("before_unload_core_module");
    uninit_libretro_symbols(&runloop_st->current_core);
+   ps3_ra_mem_trace("after_unload_core_module");
    runloop_st->current_core.flags &= ~RETRO_CORE_FLAG_SYMBOLS_INITED;
 
    /* Restore original refresh rate, if it has been changed
@@ -5283,8 +5289,10 @@ bool runloop_event_init_core(
 
    video_driver_cached_frame_invalidate();
 
+   ps3_ra_mem_trace("before_retro_init");
    runloop_st->current_core.retro_init();
    runloop_st->current_core.flags         |= RETRO_CORE_FLAG_INITED;
+   ps3_ra_mem_trace("after_retro_init");
 
    /* Attempt to set initial disk index */
    if (initial_disk_change_enable)
@@ -5293,6 +5301,7 @@ bool runloop_event_init_core(
          path_get(RARCH_PATH_CONTENT),
          runloop_st->savefile_dir);
 
+   ps3_ra_mem_trace("before_content_handling");
    if (!event_init_content(runloop_st, settings, input_st))
    {
       runloop_st->flags &= ~RUNLOOP_FLAG_CORE_RUNNING;
@@ -5305,6 +5314,7 @@ bool runloop_event_init_core(
 
    if (!runloop_event_load_core(runloop_st, poll_type_behavior))
       return false;
+   ps3_ra_mem_trace("after_content_handling");
 
    runloop_set_frame_limit(&video_st->av_info, fastforward_ratio);
    runloop_st->frame_limit_last_time    = cpu_features_get_time_usec();
@@ -8865,6 +8875,7 @@ bool core_load_game(retro_ctx_load_content_info_t *load_info)
    runloop_state_t *runloop_st    = &runloop_state;
 
    video_driver_cached_frame_invalidate();
+   ps3_ra_mem_trace("before_core_load");
 
 #ifdef HAVE_RUNAHEAD
    runahead_set_load_content_info(runloop_st, load_info);
@@ -8885,6 +8896,7 @@ bool core_load_game(retro_ctx_load_content_info_t *load_info)
 
    if (game_loaded)
    {
+      ps3_ra_mem_trace("after_core_load");
       /* If 'game_loaded' is true at this point, then
        * core is actually running; register that any
        * changes to global remap-related parameters
