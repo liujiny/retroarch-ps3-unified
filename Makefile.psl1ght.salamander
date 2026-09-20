@@ -18,14 +18,16 @@ HAVE_FILE_LOGGER	= 1
 PC_DEVELOPMENT_IP_ADDRESS	= "192.168.1.7"
 PC_DEVELOPMENT_UDP_PORT		= 3490
 
-CONTENTID		= UP0001-SSNE10001_00-0000000000000001
-APPID                   = SSNE10001
-TITLE                   = Retroarch PSL1GHT
-PACKAGE_BASENAME := retroarch_psl1ght
+CONTENTID		= UP0001-ARCD00001_00-0000000000000001
+APPID                   = ARCD00001
+TITLE                   = RetroArch PS3
+PACKAGE_BASENAME := retroarch_ps3_unified
 
 ELF_TARGET := retroarch_psl1ght_salamander.elf
 ELF_TARGET_NONSTRIPPED := retroarch_psl1ght_salamander_nonstripped.elf
 EBOOT_PATH		= pkg/psl1ght/pkg/USRDIR/EBOOT.BIN
+PARAM_SFO              = pkg/psl1ght/pkg/PARAM.SFO
+SFOXML                 = pkg/psl1ght/sfo.xml
 
 INCLUDE += -I. -Ideps \
 	   -Ilibretro-common/include $(LIBPSL1GHT_INC) -Iinclude -Idefines
@@ -110,7 +112,10 @@ $(ELF_TARGET): $(ELF_TARGET_NONSTRIPPED)
 create-salamander: $(ELF_TARGET)
 	$(SELF_NPDRM) $(ELF_TARGET) $(EBOOT_PATH) $(CONTENTID)
 
-pkg: create-salamander
+$(PARAM_SFO): $(SFOXML)
+	$(SFO) --title "$(TITLE)" --appid "$(APPID)" -f $(SFOXML) $(PARAM_SFO)
+
+pkg: $(PARAM_SFO) create-salamander
 	$(PKG) --contentid $(CONTENTID) pkg/psl1ght/pkg/ $(PACKAGE_BASENAME).pkg
 #	cp $(PACKAGE_BASENAME).pkg $(PACKAGE_BASENAME).gnpdrm.pkg
 #	$(PACKAGE_FINALIZE) $(PACKAGE_BASENAME).gnpdrm.pkg
