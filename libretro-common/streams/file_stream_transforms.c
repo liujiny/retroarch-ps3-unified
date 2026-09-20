@@ -21,7 +21,12 @@
 */
 
 #include <streams/file_stream.h>
+#include <file/file_path.h>
+#include <retro_dirent.h>
 #include <string.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 RFILE* rfopen(const char *path, char *mode)
 {
@@ -56,7 +61,10 @@ int rfseek(RFILE* stream, long offset, int origin)
 size_t rfread(void* buffer,
    size_t elementSize, size_t elementCount, RFILE* stream)
 {
-   return filestream_read(stream, buffer, elementSize*elementCount);
+   if (!stream || !elementSize || !elementCount)
+      return 0;
+   return filestream_read(stream, buffer, elementSize * elementCount) /
+      elementSize;
 }
 
 char *rfgets(char *buffer, int maxCount, RFILE* stream)
@@ -67,5 +75,101 @@ char *rfgets(char *buffer, int maxCount, RFILE* stream)
 size_t rfwrite(void const* buffer,
    size_t elementSize, size_t elementCount, RFILE* stream)
 {
-   return filestream_write(stream, buffer, elementSize*elementCount);
+   if (!stream || !elementSize || !elementCount)
+      return 0;
+   return filestream_write(stream, buffer, elementSize * elementCount) /
+      elementSize;
+}
+
+int rfgetc(RFILE* stream)
+{
+   return stream ? filestream_getc(stream) : EOF;
+}
+
+int rfputc(int character, RFILE* stream)
+{
+   return stream ? filestream_putc(stream, character) : EOF;
+}
+
+long long int rfflush(RFILE* stream)
+{
+   return stream ? filestream_flush(stream) : EOF;
+}
+
+int rfprintf(RFILE* stream, const char* format, ...)
+{
+   int length;
+   int result;
+   char* buffer;
+   va_list args;
+   va_list args_copy;
+
+   if (!stream)
+      return -1;
+
+   va_start(args, format);
+   va_copy(args_copy, args);
+   length = vsnprintf(NULL, 0, format, args_copy);
+   va_end(args_copy);
+   if (length < 0)
+   {
+      va_end(args);
+      return length;
+   }
+
+   buffer = (char*)malloc((size_t)length + 1);
+   if (!buffer)
+   {
+      va_end(args);
+      return -1;
+   }
+
+   vsnprintf(buffer, (size_t)length + 1, format, args);
+   va_end(args);
+   result = (int)filestream_write(stream, buffer, (size_t)length);
+   free(buffer);
+   return result;
+}
+
+int rferror(RFILE* stream)
+{
+   (void)stream;
+   return 0;
+}
+
+int rfeof(RFILE* stream)
+{
+   return stream ? filestream_eof(stream) : 1;
+}
+
+/* Newer static libretro cores initialise the optional VFS interface. The
+ * 1.6.7 frontend uses native Cell FS directly, so these are intentionally
+ * no-ops while preserving the current libretro ABI. */
+struct retro_vfs_interface_info;
+
+void filestream_vfs_init(const struct retro_vfs_interface_info* vfs_info)
+{
+   (void)vfs_info;
+}
+
+void path_vfs_init(const struct retro_vfs_interface_info* vfs_info)
+{
+   (void)vfs_info;
+}
+
+void dirent_vfs_init(const struct retro_vfs_interface_info* vfs_info)
+{
+   (void)vfs_info;
+}
+
+bool filestream_exists(const char* path)
+{
+   return path_file_exists(path);
+}
+
+struct RDIR* retro_opendir_include_hidden(const char* name,
+      bool include_hidden)
+{
+   (void)include_hidden;
+   return retro_opendir(name);
 }
