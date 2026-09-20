@@ -117,6 +117,14 @@ static void find_and_set_first_file(char *s, size_t len,
 
 static void salamander_init(char *s, size_t len)
 {
+#ifdef __CELLOS_LV2__
+   /* This build is a dedicated FBNeo launcher. Avoid stale libretro_path
+    * entries left by other RetroArch installations and select the paired
+    * core deterministically. */
+   fill_pathname_join(s, g_defaults.dirs[DEFAULT_DIR_CORE],
+         "fbneo_libretro_ps3.self", len);
+   return;
+#else
    /* normal executable loading path */
    bool config_exists = config_file_exists(g_defaults.path.config);
 
@@ -166,6 +174,7 @@ static void salamander_init(char *s, size_t len)
          config_file_free(conf);
       }
    }
+#endif
 }
 #ifdef HAVE_MAIN
 int salamander_main(int argc, char *argv[])
