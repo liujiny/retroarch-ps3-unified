@@ -56,7 +56,7 @@
 #endif
 
 #ifdef __PSL1GHT__
-#define EMULATOR_CONTENT_DIR "ARCD00001"
+#define EMULATOR_CONTENT_DIR "SSNE10001"
 #else
 #define EMULATOR_CONTENT_DIR "SSNE10000"
 #endif

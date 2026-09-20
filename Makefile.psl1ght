@@ -18,17 +18,14 @@ HAVE_FILE_LOGGER	= 1
 PC_DEVELOPMENT_IP_ADDRESS	= "192.168.1.7"
 PC_DEVELOPMENT_UDP_PORT		= 3490
 
-CONTENTID		= UP0001-ARCD00001_00-0000000000000001
-APPID                   = ARCD00001
-TITLE                   = RetroArch PS3
-PACKAGE_BASENAME := retroarch_ps3_unified
-CORE_NAME      ?= fbneo_libretro_ps3.SELF
+CONTENTID		= UP0001-SSNE10001_00-0000000000000001
+APPID                   = SSNE10001
+TITLE                   = Retroarch PSL1GHT
+PACKAGE_BASENAME := retroarch_psl1ght
 
 ELF_TARGET  := retroarch_psl1ght.elf
 SELF_TARGET := $(ELF_TARGET:.elf=.self)
-CORE_PATH    = pkg/psl1ght/pkg/USRDIR/cores/$(CORE_NAME)
-PARAM_SFO    = pkg/psl1ght/pkg/PARAM.SFO
-SFOXML       = pkg/psl1ght/sfo.xml
+CORE_PATH    = pkg/psl1ght/pkg/USRDIR/cores/CORE.SELF
 
 INCLUDE += -I. -Ideps -Ilibretro-common/include $(LIBPSL1GHT_INC) -Iinclude -Idefines -I$(PORTLIBS)/include
 LIBDIRS += -L. -L$(PORTLIBS)/lib
@@ -157,10 +154,7 @@ $(ELF_TARGET): $(OBJ)
 create-core: $(SELF_TARGET)
 	cp $(SELF_TARGET) $(CORE_PATH)
 
-$(PARAM_SFO): $(SFOXML)
-	$(SFO) --title "$(TITLE)" --appid "$(APPID)" -f $(SFOXML) $(PARAM_SFO)
-
-pkg: $(PARAM_SFO) create-core
+pkg: create-core
 	$(PKG) --contentid $(CONTENTID) pkg/psl1ght/pkg/ $(PACKAGE_BASENAME).pkg
 #	cp $(PACKAGE_BASENAME).pkg $(PACKAGE_BASENAME).gnpdrm.pkg
 #	$(PACKAGE_FINALIZE) $(PACKAGE_BASENAME).gnpdrm.pkg
