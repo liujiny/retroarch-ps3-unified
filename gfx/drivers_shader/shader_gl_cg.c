@@ -616,11 +616,21 @@ static bool gl_cg_load_stock(void *data)
    struct shader_program_info program_info;
    cg_shader_data_t *cg  = (cg_shader_data_t*)data;
 
+#if defined(__CELLOS_LV2__)
+   extern int ps3_create_stock_cg_programs(CGcontext, CGprofile, CGprofile,
+         CGprogram *, CGprogram *);
+   if (!ps3_create_stock_cg_programs(cg->cgCtx, cg->cgVProf, cg->cgFProf,
+            &cg->prg[0].vprg, &cg->prg[0].fprg))
+      goto error;
+   cgGLLoadProgram(cg->prg[0].fprg);
+   cgGLLoadProgram(cg->prg[0].vprg);
+#else
    program_info.combined = stock_cg_gl_program;
    program_info.is_file  = false;
 
    if (!gl_cg_compile_program(data, 0, &cg->prg[0], &program_info))
       goto error;
+#endif
 
    gl_cg_set_program_base_attrib(data, 0);
 

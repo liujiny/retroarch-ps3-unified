@@ -932,7 +932,7 @@ static struct config_entry_list *config_get_entry_internal(
    struct config_entry_list *entry    = NULL;
    struct config_entry_list *previous = prev ? *prev : NULL;
 
-   entry = RHMAP_GET_STR(conf->entries_map, key);
+   entry = config_get_entry(conf, key);
 
    if (entry)
       return entry;
@@ -951,7 +951,9 @@ static struct config_entry_list *config_get_entry_internal(
 struct config_entry_list *config_get_entry(
       const config_file_t *conf, const char *key)
 {
-   return RHMAP_GET_STR(conf->entries_map, key);
+   /* A lookup must not allocate or mutate a const configuration. */
+   ptrdiff_t index = RHMAP_IDX_STR(conf->entries_map, key);
+   return index < 0 ? NULL : conf->entries_map[index];
 }
 
 bool config_get_double(config_file_t *conf, const char *key, double *in)

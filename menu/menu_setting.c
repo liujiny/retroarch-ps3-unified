@@ -12163,7 +12163,9 @@ static bool setting_append_list(
                      general_read_handler,
                      SD_FLAG_NONE
                      );
+#ifndef HAVE_PSGL
                MENU_SETTINGS_LIST_CURRENT_ADD_CMD(list, list_info, CMD_EVENT_REINIT);
+#endif
             }
 
 #ifdef HAVE_ODROIDGO2

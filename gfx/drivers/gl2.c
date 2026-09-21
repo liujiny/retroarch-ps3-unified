@@ -4077,7 +4077,10 @@ static void gl2_update_tex_filter_frame(gl2_t *gl)
       : (smooth ? GL_LINEAR : GL_NEAREST);
 
    if (new_filt == gl->tex_min_filter && wrap_mode == gl->wrap_mode)
+   {
+      gl2_context_bind_hw_render(gl, true);
       return;
+   }
 
    gl->tex_min_filter    = new_filt;
    gl->tex_mag_filter    = gl2_min_filter_to_mag(gl->tex_min_filter);
@@ -4589,13 +4592,22 @@ static uint32_t gl2_get_flags(void *data)
    return flags;
 }
 
+static void gl2_set_filtering(void *data, unsigned index, bool smooth,
+      bool ctx_scaling)
+{
+   (void)index;
+   (void)smooth;
+   (void)ctx_scaling;
+   gl2_update_tex_filter_frame((gl2_t*)data);
+}
+
 static const video_poke_interface_t gl2_poke_interface = {
    gl2_get_flags,
    gl2_load_texture,
    gl2_unload_texture,
    gl2_set_video_mode,
    gl2_get_refresh_rate,
-   NULL,
+   gl2_set_filtering,
    gl2_get_video_output_size,
    gl2_get_video_output_prev,
    gl2_get_video_output_next,

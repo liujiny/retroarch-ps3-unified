@@ -77,13 +77,6 @@ static void find_first_libretro_core(char *first_file,
 
       if (!strncmp(fname, salamander_name, sizeof(fname)))
       {
-         if (list->size == (i + 1))
-         {
-            RARCH_WARN("Entry is RetroArch Salamander itself, "
-                  "but is last entry. No choice but to set it.\n");
-            strlcpy(first_file, fname, size_of_first_file);
-         }
-
          continue;
       }
 
@@ -155,7 +148,8 @@ static void salamander_init(char *s, size_t len)
       if (config_get_path(config, "libretro_path",
             libretro_path, sizeof(libretro_path)) &&
           !string_is_empty(libretro_path) &&
-          !string_is_equal(libretro_path, "builtin"))
+          !string_is_equal(libretro_path, "builtin") &&
+          path_is_valid(libretro_path))
       {
          strlcpy(s, libretro_path, len);
          config_valid = true;
@@ -220,7 +214,7 @@ int main(int argc, char *argv[])
    if (frontend_ctx && frontend_ctx->deinit)
       frontend_ctx->deinit(args);
 
-   if (frontend_ctx && frontend_ctx->exitspawn)
+   if (!string_is_empty(libretro_path) && frontend_ctx && frontend_ctx->exitspawn)
       frontend_ctx->exitspawn(libretro_path, sizeof(libretro_path), NULL);
 
    return 1;

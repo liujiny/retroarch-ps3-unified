@@ -223,6 +223,15 @@ sthread_t *sthread_create_with_priority(void (*thread_func)(void*), void *userda
    }
 #endif
 
+#if defined(__CELLOS_LV2__)
+   if (pthread_attr_setstacksize(&thread_attr, 0x40000) != 0)
+   {
+      pthread_attr_destroy(&thread_attr);
+      goto error;
+   }
+   thread_attr_needed = true;
+#endif
+
 #if defined(VITA)
    pthread_attr_setstacksize(&thread_attr , 0x10000 );
    thread_attr_needed = true;

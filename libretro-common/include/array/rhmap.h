@@ -159,7 +159,14 @@ RHMAP__UNUSED static uint32_t rhmap_hash_string(const char* str)
 
 struct rhmap__hdr { size_t len, maxlen; uint32_t *keys; char** key_strs; };
 #define RHMAP__HDR(b) (((struct rhmap__hdr *)&(b)[-1])-1)
+/* Store through the map's actual pointer type. Writing a typed pointer via
+ * void ** violates strict aliasing: Cell GCC -O2 reused the old NULL map
+ * after growth, producing a header address of -20 on its 32-bit pointer ABI. */
+#ifdef __GNUC__
+#define RHMAP__GROW(b, n) ((b) = (__typeof__(b))rhmap__grow((void*)(b), sizeof(*(b)), (size_t)(n)))
+#else
 #define RHMAP__GROW(b, n) (*(void**)(&(b)) = rhmap__grow((void*)(b), sizeof(*(b)), (size_t)(n)))
+#endif
 #define RHMAP__FIT1(b) ((b) && RHMAP_LEN(b) * 2 <= RHMAP_MAX(b) ? 0 : RHMAP__GROW(b, 0))
 
 RHMAP__UNUSED static void* rhmap__grow(void* old_ptr, size_t elem_size, size_t reserve)

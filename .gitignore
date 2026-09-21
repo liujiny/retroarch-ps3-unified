@@ -227,3 +227,7 @@ param.sfo
 
 # Visual Studio Code
 .vscode/
+
+# Cell SDK incremental build artifacts
+/objs/
+*.SELF
