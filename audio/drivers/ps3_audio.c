@@ -36,7 +36,6 @@ typedef struct
 
    sys_ppu_thread_t thread;
    sys_lwmutex_t lock;
-   sys_lwmutex_t cond_lock;
    sys_lwcond_t cond;
 } ps3_audio_t;
 
@@ -56,17 +55,22 @@ static void event_loop(uint64_t data)
    cellAudioCreateNotifyEventQueue(&id, &key);
    cellAudioSetNotifyEventQueue(key);
 
-   while (!aud->quit_thread)
+   for (;;)
    {
       sys_event_queue_receive(id, &event, SYS_NO_TIMEOUT);
 
       sys_lwmutex_lock(&aud->lock, SYS_NO_TIMEOUT);
+      if (aud->quit_thread)
+      {
+         sys_lwmutex_unlock(&aud->lock);
+         break;
+      }
       if (fifo_read_avail(aud->buffer) >= sizeof(out_tmp))
          fifo_read(aud->buffer, out_tmp, sizeof(out_tmp));
       else
          memset(out_tmp, 0, sizeof(out_tmp));
-      sys_lwmutex_unlock(&aud->lock);
       sys_lwcond_signal(&aud->cond);
+      sys_lwmutex_unlock(&aud->lock);
 
       cellAudioAddData(aud->audio_port, out_tmp,
             CELL_AUDIO_BLOCK_SAMPLES, 1.0);
@@ -116,22 +120,17 @@ static void *ps3_audio_init(const char *device,
 #ifdef __PSL1GHT__
    sys_lwmutex_attr_t lock_attr = 
    {SYS_LWMUTEX_ATTR_PROTOCOL, SYS_LWMUTEX_ATTR_RECURSIVE, "\0"};
-   sys_lwmutex_attr_t cond_lock_attr =
-   {SYS_LWMUTEX_ATTR_PROTOCOL, SYS_LWMUTEX_ATTR_RECURSIVE, "\0"};
    sys_lwcond_attribute_t cond_attr = {"\0"};
 #else
    sys_lwmutex_attribute_t lock_attr;
-   sys_lwmutex_attribute_t cond_lock_attr;
    sys_lwcond_attribute_t cond_attr;
 
    sys_lwmutex_attribute_initialize(lock_attr);
-   sys_lwmutex_attribute_initialize(cond_lock_attr);
    sys_lwcond_attribute_initialize(cond_attr);
 #endif
 
    sys_lwmutex_create(&data->lock, &lock_attr);
-   sys_lwmutex_create(&data->cond_lock, &cond_lock_attr);
-   sys_lwcond_create(&data->cond, &data->cond_lock, &cond_attr);
+   sys_lwcond_create(&data->cond, &data->lock, &cond_attr);
 
    cellAudioPortStart(data->audio_port);
    data->started = true;
@@ -149,21 +148,34 @@ static void *ps3_audio_init(const char *device,
 static ssize_t ps3_audio_write(void *data, const void *buf, size_t size)
 {
    ps3_audio_t *aud = data;
-
-   if (aud->nonblocking)
-   {
-      if (fifo_write_avail(aud->buffer) < size)
-         return 0;
-   }
-
-   while (fifo_write_avail(aud->buffer) < size)
-      sys_lwcond_wait(&aud->cond, 0);
+   size_t written = 0;
+   const uint8_t *input = (const uint8_t*)buf;
 
    sys_lwmutex_lock(&aud->lock, SYS_NO_TIMEOUT);
-   fifo_write(aud->buffer, buf, size);
+   while (written < size)
+   {
+      size_t avail = fifo_write_avail(aud->buffer);
+      size_t chunk = size - written;
+      /* Keep writes aligned to complete interleaved float frames. */
+      avail -= avail % (AUDIO_CHANNELS * sizeof(float));
+      if (!avail)
+      {
+         if (aud->nonblocking || aud->quit_thread)
+            break;
+         if (sys_lwcond_wait(&aud->cond, 0) != CELL_OK)
+         {
+            sys_lwmutex_unlock(&aud->lock);
+            return written ? (ssize_t)written : -1;
+         }
+         continue;
+      }
+      if (chunk > avail)
+         chunk = avail;
+      fifo_write(aud->buffer, input + written, chunk);
+      written += chunk;
+   }
    sys_lwmutex_unlock(&aud->lock);
-
-   return size;
+   return written;
 }
 
 static bool ps3_audio_stop(void *data)
@@ -200,7 +212,11 @@ static void ps3_audio_set_nonblock_state(void *data, bool toggle)
 {
    ps3_audio_t *aud = data;
    if (aud)
+   {
+      sys_lwmutex_lock(&aud->lock, SYS_NO_TIMEOUT);
       aud->nonblocking = toggle;
+      sys_lwmutex_unlock(&aud->lock);
+   }
 }
 
 static void ps3_audio_free(void *data)
@@ -208,7 +224,10 @@ static void ps3_audio_free(void *data)
    uint64_t val;
    ps3_audio_t *aud = data;
 
+   sys_lwmutex_lock(&aud->lock, SYS_NO_TIMEOUT);
    aud->quit_thread = true;
+   sys_lwcond_signal(&aud->cond);
+   sys_lwmutex_unlock(&aud->lock);
    ps3_audio_start(aud, false);
    sys_ppu_thread_join(aud->thread, &val);
 
@@ -217,9 +236,8 @@ static void ps3_audio_free(void *data)
    cellAudioQuit();
    fifo_free(aud->buffer);
 
-   sys_lwmutex_destroy(&aud->lock);
-   sys_lwmutex_destroy(&aud->cond_lock);
    sys_lwcond_destroy(&aud->cond);
+   sys_lwmutex_destroy(&aud->lock);
 
    free(data);
 }

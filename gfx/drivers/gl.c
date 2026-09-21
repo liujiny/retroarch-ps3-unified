@@ -2151,7 +2151,10 @@ static void gl_update_tex_filter_frame(gl_t *gl)
       : (smooth ? GL_LINEAR : GL_NEAREST);
 
    if (new_filt == gl->tex_min_filter && wrap_mode == gl->wrap_mode)
+   {
+      context_bind_hw_render(true);
       return;
+   }
 
    gl->tex_min_filter    = new_filt;
    gl->tex_mag_filter    = min_filter_to_mag(gl->tex_min_filter);
@@ -2171,6 +2174,27 @@ static void gl_update_tex_filter_frame(gl_t *gl)
 
    glBindTexture(GL_TEXTURE_2D, gl->texture[gl->tex_index]);
    context_bind_hw_render(true);
+}
+
+static void gl_set_filtering(void *data, unsigned index, bool smooth)
+{
+   /* Settings already contain the new value. Respect shader overrides and
+    * update every history texture, not just the currently bound one. */
+   (void)smooth;
+   if (data && index == 1)
+   {
+      gl_update_tex_filter_frame((gl_t*)data);
+#ifdef HAVE_PSGL
+      {
+         gl_t *gl = (gl_t*)data;
+         printf("[PS3 filter] requested=%s selected=%s texture=%u submitted_min=0x%x submitted_mag=0x%x (no video reinit)\n",
+               smooth ? "LINEAR" : "NEAREST",
+               gl->video_info.smooth ? "LINEAR" : "NEAREST",
+               (unsigned)gl->texture[gl->tex_index],
+               (unsigned)gl->tex_min_filter, (unsigned)gl->tex_mag_filter);
+      }
+#endif
+   }
 }
 
 static bool gl_set_shader(void *data,
@@ -2642,7 +2666,7 @@ static const video_poke_interface_t gl_poke_interface = {
    gl_load_texture,
    gl_unload_texture,
    gl_set_video_mode,
-   NULL,
+   gl_set_filtering,
    gl_get_video_output_size,
    gl_get_video_output_prev,
    gl_get_video_output_next,
@@ -2711,4 +2735,3 @@ video_driver_t video_gl = {
    gl_get_poke_interface,
    gl_wrap_type_to_enum,
 };
-

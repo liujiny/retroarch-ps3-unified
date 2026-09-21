@@ -646,19 +646,40 @@ static bool gl_cg_load_stock(void *data)
    struct shader_program_info program_info;
    cg_shader_data_t *cg  = (cg_shader_data_t*)data;
 
+#if defined(__CELLOS_LV2__)
+   /* RPCS3 currently faults inside the SDK Cg runtime compiler while parsing
+    * even this fixed passthrough shader.  Create ordinary Cg program objects
+    * from embedded, offline-compiled RSX binaries instead. */
+   extern int ps3_create_stock_cg_programs(CGcontext context,
+         CGprofile vertex_profile, CGprofile fragment_profile,
+         CGprogram *vertex, CGprogram *fragment);
+
+   if (!ps3_create_stock_cg_programs(cg->cgCtx, cg->cgVProf, cg->cgFProf,
+            &cg->prg[0].vprg, &cg->prg[0].fprg))
+   {
+      RARCH_ERR("Failed to create embedded PS3 stock shader programs.\n");
+      return false;
+   }
+
+   cgGLLoadProgram(cg->prg[0].fprg);
+   cgGLLoadProgram(cg->prg[0].vprg);
+#else
    program_info.combined = stock_cg_gl_program;
    program_info.is_file  = false;
 
    if (!gl_cg_compile_program(data, 0, &cg->prg[0], &program_info))
       goto error;
+#endif
 
    gl_cg_set_program_base_attrib(data, 0);
 
    return true;
 
+#if !defined(__CELLOS_LV2__)
 error:
    RARCH_ERR("Failed to compile passthrough shader, is something wrong with your environment?\n");
    return false;
+#endif
 }
 
 static bool gl_cg_load_plain(void *data, const char *path)
@@ -1243,4 +1264,3 @@ const shader_backend_t gl_cg_backend = {
    RARCH_SHADER_CG,
    "gl_cg"
 };
-

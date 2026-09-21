@@ -256,7 +256,9 @@ VIDEO SHADERS
 
 #ifdef HAVE_CG
 #ifdef HAVE_OPENGL
+#if !defined(__CELLOS_LV2__) || !defined(PS3_CG_SEPARATE)
 #include "../gfx/drivers_shader/shader_gl_cg.c"
+#endif
 #endif
 #endif
 
@@ -698,8 +700,12 @@ DRIVERS
 ============================================================ */
 #include "../gfx/video_driver.c"
 #include "../gfx/video_coord_array.c"
+#if !defined(__CELLOS_LV2__) || !defined(PS3_INPUT_DRIVER_SEPARATE)
 #include "../input/input_driver.c"
+#endif
+#if !defined(__CELLOS_LV2__) || !defined(PS3_AUDIO_DRIVER_SEPARATE)
 #include "../audio/audio_driver.c"
+#endif
 #include "../libretro-common/audio/audio_mixer.c"
 #include "../camera/camera_driver.c"
 #include "../location/location_driver.c"
@@ -799,7 +805,7 @@ FRONTEND
 #if defined(_WIN32) && !defined(_XBOX)
 #include "../frontend/drivers/platform_win32.c"
 #endif
-#if defined(__CELLOS_LV2__)
+#if defined(__CELLOS_LV2__) && !defined(PS3_PLATFORM_SEPARATE)
 #include "../frontend/drivers/platform_ps3.c"
 #elif defined(GEKKO)
 #include "../frontend/drivers/platform_gx.c"

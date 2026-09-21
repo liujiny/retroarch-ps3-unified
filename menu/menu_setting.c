@@ -3634,7 +3634,9 @@ static bool setting_append_list(
                   general_read_handler,
                   SD_FLAG_NONE
                   );
+#if !defined(HAVE_PSGL)
             menu_settings_list_current_add_cmd(list, list_info, CMD_EVENT_REINIT);
+#endif
 
             CONFIG_UINT(
                   list, list_info,

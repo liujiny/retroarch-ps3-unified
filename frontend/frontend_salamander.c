@@ -121,8 +121,9 @@ static void salamander_init(char *s, size_t len)
    /* This build is a dedicated FBNeo launcher. Avoid stale libretro_path
     * entries left by other RetroArch installations and select the paired
     * core deterministically. */
-   fill_pathname_join(s, g_defaults.dirs[DEFAULT_DIR_CORE],
-         "fbneo_libretro_ps3.self", len);
+   strlcpy(s,
+         "/dev_hdd0/game/ARCD00001/USRDIR/cores/fbneo_libretro_ps3.self",
+         len);
    return;
 #else
    /* normal executable loading path */

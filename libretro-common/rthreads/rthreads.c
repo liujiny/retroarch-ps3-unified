@@ -174,7 +174,20 @@ sthread_t *sthread_create(void (*thread_func)(void*), void *userdata)
    thread->thread = CreateThread(NULL, 0, thread_wrap, data, 0, NULL);
    thread_created = !!thread->thread;
 #else
-#if defined(VITA)
+#if defined(__CELLOS_LV2__)
+   /* Cell SDK pthreads default to 16 KiB. Autoconfiguration and path
+    * helpers already require multiple nested 8 KiB stack frames. */
+   pthread_attr_t thread_attr;
+   if (pthread_attr_init(&thread_attr) != 0)
+      goto error;
+   if (pthread_attr_setstacksize(&thread_attr, 0x40000) != 0)
+   {
+      pthread_attr_destroy(&thread_attr);
+      goto error;
+   }
+   thread_created = pthread_create(&thread->id, &thread_attr, thread_wrap, data) == 0;
+   pthread_attr_destroy(&thread_attr);
+#elif defined(VITA)
    pthread_attr_t thread_attr;
    pthread_attr_init(&thread_attr);
    pthread_attr_setstacksize(&thread_attr , 0x10000 );

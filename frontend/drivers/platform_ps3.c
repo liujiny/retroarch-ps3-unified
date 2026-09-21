@@ -38,10 +38,16 @@
 #include <lists/file_list.h>
 #endif
 
+#ifdef HAVE_MENU
+#include "../../menu/menu_driver.h"
+#endif
+
 #include "../frontend_driver.h"
 #include "../../file_path_special.h"
 #include "../../defines/ps3_defines.h"
 #include "../../defaults.h"
+#include "../../retroarch.h"
+#include "../../paths.h"
 #include "../../verbosity.h"
 
 #define EMULATOR_CONTENT_DIR "SSNE10000"
@@ -112,7 +118,7 @@ static void frontend_ps3_get_environment_settings(int *argc, char *argv[],
 #if defined(HAVE_LOGGER)
    logger_init();
 #elif defined(HAVE_FILE_LOGGER)
-   retro_main_log_file_init("/retroarch-log.txt");
+retro_main_log_file_init("/dev_hdd0/tmp/fbneo-cell-startup.log");
 #endif
 #endif
 
@@ -380,6 +386,14 @@ static bool frontend_ps3_set_fork(enum frontend_fork fork_mode)
 static int frontend_ps3_exec_exitspawn(const char *path,
       char const *argv[], char const *envp[])
 {
+#ifdef IS_SALAMANDER
+   /* The dedicated ARCD00001 launcher starts a regular FSELF core. Calling
+    * sceNpDrmProcessExitSpawn first can reject it before the fallback path
+    * on some CEX/HEN configurations. */
+   sys_game_process_exitspawn(path, (const char** const)argv,
+         envp, NULL, 0, 1000, SYS_PROCESS_PRIMARY_STACK_SIZE_1M);
+   return 0;
+#else
    int ret;
    unsigned i;
    char spawn_data[256];
@@ -400,6 +414,7 @@ static int frontend_ps3_exec_exitspawn(const char *path,
    }
 
    return ret;
+#endif
 }
 
 static void frontend_ps3_exec(const char *path, bool should_load_game)
