@@ -50,6 +50,7 @@
 #include "../../defaults.h"
 #include "../../verbosity.h"
 #include "../../paths.h"
+#include "../ps3_boot_diag.h"
 
 #ifdef __PSL1GHT__
 #define EMULATOR_CONTENT_DIR "SSNE10001"
@@ -298,6 +299,7 @@ static void frontend_ps3_get_env(int *argc, char *argv[],
    memset(&size, 0x00, sizeof(CellGameContentSize));
 
    ret = cellGameBootCheck(&get_type, &get_attributes, &size, dirName);
+   ps3_boot_diag("cellGameBootCheck returned 0x%08x", (unsigned)ret);
 
    if (ret < 0)
    {
@@ -327,6 +329,8 @@ static void frontend_ps3_get_env(int *argc, char *argv[],
          RARCH_LOG("RetroArch was launched from host machine (APP_HOME).\n");
 
       ret = cellGameContentPermit(content_info_path, g_defaults.dirs[DEFAULT_DIR_PORT]);
+      ps3_boot_diag("cellGameContentPermit returned 0x%08x content=[%s] usrdir=[%s]",
+            (unsigned)ret, content_info_path, g_defaults.dirs[DEFAULT_DIR_PORT]);
 
 #ifdef HAVE_MULTIMAN
       if (multiman_detected)
@@ -358,6 +362,7 @@ static void frontend_ps3_get_env(int *argc, char *argv[],
 static void frontend_ps3_init(void *data)
 {
    (void)data;
+   ps3_boot_diag("platform init entered");
 #ifdef PS3_CELL_TEST_BUILD
    printf("[PS3 Cell] RetroArch 1.10.3 test1 build=%d; full-width TOC, live filtering, synchronized audio FIFO\n", PS3_CELL_TEST_BUILD);
 #endif
@@ -396,8 +401,13 @@ static void frontend_ps3_init(void *data)
 #endif
 
 #ifndef __PSL1GHT__
+   ps3_boot_diag("sys_net_initialize_network begin");
    sys_net_initialize_network();
-   sceNpInit(NP_POOL_SIZE, np_pool);
+   ps3_boot_diag("sceNpInit begin");
+   {
+      int np_result = sceNpInit(NP_POOL_SIZE, np_pool);
+      ps3_boot_diag("sceNpInit returned 0x%08x", (unsigned)np_result);
+   }
 #endif
 
 #ifndef IS_SALAMANDER
@@ -491,9 +501,11 @@ static int frontend_ps3_exec_exitspawn(const char *path,
       spawn_data[i] = i & 0xff;
 
 #ifndef __PSL1GHT__
+   ps3_boot_diag("sceNpDrmProcessExitSpawn begin: path=[%s] exists=%d", path, path_is_valid(path));
    ret = sceNpDrmProcessExitSpawn(license_data, path,
          (const char** const)argv, envp, (sys_addr_t)spawn_data,
          256, 1000, SYS_PROCESS_SPAWN_STACK_SIZE_1M);
+   ps3_boot_diag("sceNpDrmProcessExitSpawn returned 0x%08x", (unsigned)ret);
 #else
    ret = -1;
 #endif
@@ -501,8 +513,10 @@ static int frontend_ps3_exec_exitspawn(const char *path,
    if (ret <  0)
    {
       RARCH_WARN("SELF file is not of NPDRM type, trying another approach to boot it...\n");
+      ps3_boot_diag("fallback sys_game_process_exitspawn begin (void API; no return code)");
       sysProcessExitSpawn2(path, (const char** const)argv,
             envp, NULL, 0, 1000, SYS_PROCESS_SPAWN_STACK_SIZE_1M);
+      ps3_boot_diag("fallback sys_game_process_exitspawn unexpectedly returned");
    }
 
    return ret;

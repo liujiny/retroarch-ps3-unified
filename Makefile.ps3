@@ -159,7 +159,7 @@ include $(CELL_MK_DIR)/sdk.target.mk
 # Large Griffin translation units require full-width TOC addressing.
 ifneq ($(findstring gcc,$(PPU_CC)),)
 PPU_CFLAGS += -fno-jump-tables -mall-base-toc -Wa,--fatal-warnings
-$(OBJS_DIR)/griffin/griffin.ppu.o: Makefile.ps3
+$(OBJS_DIR)/griffin/griffin.ppu.o: Makefile.ps3 core_info.c frontend/ps3_core_info_diag.h gfx/drivers_shader/shader_gl_cg.c
 endif
 
 MAKE_FSELF = $(CELL_SDK)/host-win32/bin/make_fself.exe

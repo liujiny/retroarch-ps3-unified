@@ -27,6 +27,7 @@
 #include <file/config_file.h>
 #include <file/file_path.h>
 #include <retro_assert.h>
+#include <streams/file_stream.h>
 #include <string/stdstring.h>
 
 #ifdef HAVE_CONFIG_H
@@ -489,6 +490,137 @@ static void gl_cg_deinit(void *data)
    free(cg);
 }
 
+#if defined(__CELLOS_LV2__)
+#define CG_INCLUDE_MAX_DEPTH 16
+
+static bool gl_cg_source_append(char **output, size_t *output_len,
+      size_t *output_capacity, const char *data, size_t data_len)
+{
+   char *new_output;
+   size_t new_capacity;
+   size_t required = *output_len + data_len + 1;
+
+   if (required < *output_len)
+      return false;
+
+   if (required > *output_capacity)
+   {
+      new_capacity = *output_capacity ? *output_capacity : 4096;
+      while (new_capacity < required)
+      {
+         if (new_capacity > SIZE_MAX / 2)
+            return false;
+         new_capacity *= 2;
+      }
+
+      new_output = (char*)realloc(*output, new_capacity);
+      if (!new_output)
+         return false;
+      *output          = new_output;
+      *output_capacity = new_capacity;
+   }
+
+   memcpy(*output + *output_len, data, data_len);
+   *output_len += data_len;
+   (*output)[*output_len] = '\0';
+   return true;
+}
+
+static bool gl_cg_expand_includes_file(const char *path, unsigned depth,
+      char **output, size_t *output_len, size_t *output_capacity)
+{
+   char *source       = NULL;
+   const char *cursor = NULL;
+   int64_t source_len = 0;
+
+   if (depth >= CG_INCLUDE_MAX_DEPTH)
+   {
+      RARCH_ERR("[CG]: Include depth exceeded while reading: %s\n", path);
+      return false;
+   }
+
+   if (!filestream_read_file(path, (void**)&source, &source_len) || !source)
+   {
+      RARCH_ERR("[CG]: Failed to read shader source/include: %s\n", path);
+      return false;
+   }
+
+   cursor = source;
+   while (cursor < source + source_len)
+   {
+      const char *line_end = (const char*)memchr(cursor, '\n',
+            (size_t)((source + source_len) - cursor));
+      const char *scan     = cursor;
+      const char *quote    = NULL;
+      const char *quote_end;
+      size_t line_len;
+
+      if (!line_end)
+         line_end = source + source_len;
+      line_len = (size_t)(line_end - cursor);
+
+      while (scan < line_end && (*scan == ' ' || *scan == '\t'))
+         scan++;
+      if (scan < line_end && *scan == '#')
+      {
+         scan++;
+         while (scan < line_end && (*scan == ' ' || *scan == '\t'))
+            scan++;
+         if ((size_t)(line_end - scan) >= 7 &&
+               memcmp(scan, "include", 7) == 0)
+         {
+            scan += 7;
+            while (scan < line_end && (*scan == ' ' || *scan == '\t'))
+               scan++;
+            if (scan < line_end && *scan == '"')
+               quote = scan;
+         }
+      }
+
+      quote_end = quote ? (const char*)memchr(quote + 1, '"',
+            (size_t)(line_end - quote - 1)) : NULL;
+      if (quote && quote_end)
+      {
+         char include_name[PATH_MAX_LENGTH];
+         char include_path[PATH_MAX_LENGTH];
+         size_t include_len = (size_t)(quote_end - quote - 1);
+
+         if (include_len >= sizeof(include_name))
+         {
+            RARCH_ERR("[CG]: Include path is too long in: %s\n", path);
+            free(source);
+            return false;
+         }
+
+         memcpy(include_name, quote + 1, include_len);
+         include_name[include_len] = '\0';
+         fill_pathname_resolve_relative(include_path, path, include_name,
+               sizeof(include_path));
+         RARCH_LOG("[CG]: Expanding include: %s\n", include_path);
+         if (!gl_cg_expand_includes_file(include_path, depth + 1,
+                  output, output_len, output_capacity) ||
+               !gl_cg_source_append(output, output_len, output_capacity,
+                  "\n", 1))
+         {
+            free(source);
+            return false;
+         }
+      }
+      else if (!gl_cg_source_append(output, output_len, output_capacity,
+               cursor, line_len + (line_end < source + source_len ? 1 : 0)))
+      {
+         free(source);
+         return false;
+      }
+
+      cursor = line_end < source + source_len ? line_end + 1 : line_end;
+   }
+
+   free(source);
+   return true;
+}
+#endif
+
 static bool gl_cg_compile_program(
       void *data,
       unsigned idx,
@@ -498,6 +630,9 @@ static bool gl_cg_compile_program(
    const char *argv[2 + GFX_MAX_SHADERS];
    const char *list                  = NULL;
    bool ret                          = true;
+   char *expanded_source             = NULL;
+   size_t expanded_len               = 0;
+   size_t expanded_capacity          = 0;
    char *listing_f                   = NULL;
    char *listing_v                   = NULL;
    unsigned i, argc                  = 0;
@@ -509,6 +644,25 @@ static bool gl_cg_compile_program(
 
    argv[argc++] = "-DPARAMETER_UNIFORM";
 
+#if defined(__CELLOS_LV2__)
+   /* PSGL's runtime Cg compiler cannot reliably open include files, even when
+    * their absolute search directory is supplied with -I. Expand quoted
+    * includes here while file access is still under RetroArch's control. */
+   if (program_info->is_file)
+   {
+      if (!gl_cg_expand_includes_file(program_info->combined, 0,
+               &expanded_source, &expanded_len, &expanded_capacity))
+      {
+         RARCH_ERR("[CG]: Failed to expand shader includes: %s\n",
+               program_info->combined);
+         ret = false;
+         goto end;
+      }
+      RARCH_LOG("[CG]: Expanded shader source: %s (%u bytes)\n",
+            program_info->combined, (unsigned)expanded_len);
+   }
+#endif
+
    for (i = 0; i < GFX_MAX_SHADERS; i++)
    {
       if (*(cg->alias_define[i]))
@@ -517,7 +671,10 @@ static bool gl_cg_compile_program(
 
    argv[argc] = NULL;
 
-   if (program_info->is_file)
+   if (expanded_source)
+      program->fprg = cgCreateProgram(cg->cgCtx, CG_SOURCE,
+            expanded_source, cg->cgFProf, "main_fragment", argv);
+   else if (program_info->is_file)
       program->fprg = cgCreateProgramFromFile(
             cg->cgCtx, CG_SOURCE,
             program_info->combined, cg->cgFProf, "main_fragment", argv);
@@ -532,7 +689,10 @@ static bool gl_cg_compile_program(
 
    list = NULL;
 
-   if (program_info->is_file)
+   if (expanded_source)
+      program->vprg = cgCreateProgram(cg->cgCtx, CG_SOURCE,
+            expanded_source, cg->cgVProf, "main_vertex", argv);
+   else if (program_info->is_file)
       program->vprg = cgCreateProgramFromFile(
             cg->cgCtx, CG_SOURCE,
             program_info->combined, cg->cgVProf, "main_vertex", argv);
@@ -561,6 +721,7 @@ static bool gl_cg_compile_program(
    cgGLLoadProgram(program->vprg);
 
 end:
+   free(expanded_source);
    free(listing_f);
    free(listing_v);
    return ret;

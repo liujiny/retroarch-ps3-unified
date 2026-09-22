@@ -34,6 +34,7 @@
 #include "../defaults.h"
 #include "../verbosity.h"
 #include "../file_path_special.h"
+#include "ps3_boot_diag.h"
 
 struct defaults g_defaults;
 
@@ -137,13 +138,20 @@ static void salamander_init(char *s, size_t len)
       path_mkdir(config_dir);
 
    /* Attempt to open config file */
+   ps3_boot_diag("config: opening [%s]; cores=[%s]", config_path,
+         g_defaults.dirs[DEFAULT_DIR_CORE]);
    config = config_file_new_from_path_to_string(config_path);
+   ps3_boot_diag("config: parsed=%d", config != NULL);
 
    if (config)
    {
       char libretro_path[PATH_MAX_LENGTH];
 
       libretro_path[0] = '\0';
+
+      config_get_path(config, "libretro_path", libretro_path, sizeof(libretro_path));
+      ps3_boot_diag("config: libretro_path=[%s] exists=%d", libretro_path,
+            !string_is_empty(libretro_path) && path_is_valid(libretro_path));
 
       if (config_get_path(config, "libretro_path",
             libretro_path, sizeof(libretro_path)) &&
@@ -161,6 +169,7 @@ static void salamander_init(char *s, size_t len)
 
    if (!config_valid)
    {
+      ps3_boot_diag("config: invalid/missing target; searching core directory");
       char executable_name[PATH_MAX_LENGTH];
 
       executable_name[0] = '\0';
@@ -198,24 +207,35 @@ int main(int argc, char *argv[])
    char libretro_path[PATH_MAX_LENGTH] = {0};
    void *args                          = NULL;
    struct rarch_main_wrap *wrap_args   = NULL;
-   frontend_ctx_driver_t *frontend_ctx = (frontend_ctx_driver_t*)frontend_ctx_init_first();
+   frontend_ctx_driver_t *frontend_ctx;
+
+   ps3_boot_diag("=== test2 real-hardware boot diagnostic v1: main entered argc=%d ===", argc);
+   frontend_ctx = (frontend_ctx_driver_t*)frontend_ctx_init_first();
+   ps3_boot_diag("frontend driver found=%d", frontend_ctx != NULL);
 
    if (!frontend_ctx)
       return 0;
 
    if (frontend_ctx && frontend_ctx->init)
       frontend_ctx->init(args);
+   ps3_boot_diag("frontend init completed");
 
    if (frontend_ctx && frontend_ctx->environment_get)
       frontend_ctx->environment_get(&argc, argv, args, wrap_args);
+   ps3_boot_diag("environment completed: port=[%s] config=[%s]",
+         g_defaults.dirs[DEFAULT_DIR_PORT], g_defaults.path_config);
 
    salamander_init(libretro_path, sizeof(libretro_path));
+   ps3_boot_diag("selected executable=[%s]", libretro_path);
 
    if (frontend_ctx && frontend_ctx->deinit)
       frontend_ctx->deinit(args);
+   ps3_boot_diag("frontend deinit completed; about to exit-spawn");
 
    if (!string_is_empty(libretro_path) && frontend_ctx && frontend_ctx->exitspawn)
       frontend_ctx->exitspawn(libretro_path, sizeof(libretro_path), NULL);
+
+   ps3_boot_diag("launcher returning to system: exit-spawn returned or no executable");
 
    return 1;
 }

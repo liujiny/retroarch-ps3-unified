@@ -35,6 +35,7 @@
 
 #include "core_info.h"
 #include "file_path_special.h"
+#include "frontend/ps3_core_info_diag.h"
 
 #if defined(__WINRT__) || defined(WINAPI_FAMILY) && WINAPI_FAMILY == WINAPI_FAMILY_PHONE_APP
 #include "uwp/uwp_func.h"
@@ -1391,6 +1392,8 @@ static core_path_list_t *core_info_path_list_new(const char *core_dir,
    dir_list_ok = dir_list_append(path_list->dir_list,
          core_dir, exts, false, show_hidden_files,
                false, false);
+   ps3_core_info_diag("scan dir=[%s] extensions=[%s] ok=%d entries=%u",
+         core_dir, exts, dir_list_ok, (unsigned)path_list->dir_list->size);
 
 #if defined(__WINRT__) || defined(WINAPI_FAMILY) && WINAPI_FAMILY == WINAPI_FAMILY_PHONE_APP
    {
@@ -1433,6 +1436,7 @@ static core_path_list_t *core_info_path_list_new(const char *core_dir,
    for (i = 0; i < path_list->dir_list->size; i++)
    {
       const char *file_path = path_list->dir_list->elems[i].data;
+      ps3_core_info_diag("scan entry=[%s]", file_path);
       const char *filename  = NULL;
       const char *file_ext  = NULL;
 
@@ -1657,6 +1661,7 @@ static config_file_t *core_info_get_config_file(
       const char *info_dir)
 {
    char info_path[PATH_MAX_LENGTH];
+   config_file_t *conf;
 
    if (string_is_empty(info_dir))
       snprintf(info_path, sizeof(info_path),
@@ -1669,7 +1674,27 @@ static config_file_t *core_info_get_config_file(
       strlcat(info_path, ".info", sizeof(info_path));
    }
 
-   return config_file_new_from_path_to_string(info_path);
+   ps3_core_info_diag("info id=[%s] path=[%s] valid=%d",
+         core_file_id, info_path, path_is_valid(info_path));
+#if defined(__CELLOS_LV2__)
+   {
+      FILE *probe = fopen(info_path, "rb");
+      int open_error = errno;
+      unsigned char head[4] = {0, 0, 0, 0};
+      size_t bytes = 0;
+      if (probe)
+      {
+         bytes = fread(head, 1, sizeof(head), probe);
+         fclose(probe);
+      }
+      ps3_core_info_diag("info stdio_open=%d errno=%d prefix_bytes=%u prefix=%02x%02x%02x%02x",
+            probe != NULL, probe ? 0 : open_error, (unsigned)bytes,
+            head[0], head[1], head[2], head[3]);
+   }
+#endif
+   conf = config_file_new_from_path_to_string(info_path);
+   ps3_core_info_diag("info parsed=%d", conf != NULL);
+   return conf;
 }
 
 static void core_info_parse_config_file(
@@ -1994,6 +2019,9 @@ static core_info_list_t *core_info_list_new(const char *path,
    const char *info_dir                         = libretro_info_dir;
    core_path_list_t *path_list                  = core_info_path_list_new(
          path, exts, dir_show_hidden_files);
+   ps3_core_info_diag("=== core-info diagnostic v1: cores=[%s] info=[%s] exts=[%s] cache=%d path_list=%d ===",
+         path ? path : "", info_dir ? info_dir : "", exts ? exts : "",
+         enable_cache, path_list != NULL);
    if (!path_list)
       goto error;
 
@@ -2052,6 +2080,7 @@ static core_info_list_t *core_info_list_new(const char *path,
 
          if (info_cache)
          {
+            ps3_core_info_diag("cache hit id=[%s] has_info=%d", core_file_id, info_cache->has_info);
             core_info_copy(info_cache, info);
 
             /* Core path is 'dynamic', and cannot
@@ -2105,6 +2134,10 @@ static core_info_list_t *core_info_list_new(const char *path,
          core_info_parse_config_file(core_info_list, info, conf);
          config_file_free(conf);
       }
+      ps3_core_info_diag("core path=[%s] id=[%s] has_info=%d name=[%s] extensions=[%s]",
+            base_path, core_file_id, info->has_info,
+            info->display_name ? info->display_name : "",
+            info->supported_extensions ? info->supported_extensions : "");
 
       /* Get fallback display name, if required */
       if (!info->display_name)
@@ -2150,6 +2183,8 @@ static core_info_list_t *core_info_list_new(const char *path,
    }
 
    core_info_path_list_free(path_list);
+   ps3_core_info_diag("list ready count=%u info_count=%u", (unsigned)core_info_list->count,
+         (unsigned)core_info_list->info_count);
    return core_info_list;
 
 error:
@@ -2400,13 +2435,20 @@ bool core_info_load(const char *core_path)
       core_info_init_current_core();
 
    core_info_get_current_core(&core_info);
+   ps3_core_info_diag("associate path=[%s] list=%d current=%d",
+         core_path ? core_path : "", p_coreinfo->curr_list != NULL, core_info != NULL);
 
    if (!p_coreinfo->curr_list)
       return false;
 
    if (!core_info_list_get_info(p_coreinfo->curr_list,
             core_info, core_path))
+   {
+      ps3_core_info_diag("associate failed");
       return false;
+   }
+
+   ps3_core_info_diag("associate success has_info=%d", core_info->has_info);
 
    return true;
 }
