@@ -26,6 +26,10 @@
 #include "runloop.h"
 #include "verbosity.h"
 
+#if defined(__PS3__) && !defined(__PSL1GHT__)
+#include <sys/memory.h>
+#endif
+
 #ifdef HAVE_BLUETOOTH
 #include "bluetooth/bluetooth_driver.h"
 #endif
@@ -585,12 +589,25 @@ void drivers_init(
    core_info_init_current_core();
 
 #if defined(HAVE_GFX_WIDGETS)
+   bool widgets_allowed = video_font_enable && menu_enable_widgets;
+#if defined(__PS3__) && !defined(__PSL1GHT__)
+   if (widgets_allowed)
+   {
+      sys_memory_info_t mem_info;
+      int mem_result = sys_memory_get_user_memory_size(&mem_info);
+
+      /* Widgets load several fonts and textures. Leave room for the menu
+       * and the core when large arcade games are already resident. */
+      if (mem_result == 0 &&
+          mem_info.available_user_memory < 32u * 1024u * 1024u)
+         widgets_allowed = false;
+   }
+#endif
    /* Note that we only enable widgets if 'video_font_enable'
     * is true. 'video_font_enable' corresponds to the generic
     * 'On-Screen Notifications' setting, which should serve as
     * a global notifications on/off toggle switch */
-   if (video_font_enable &&
-       menu_enable_widgets &&
+   if (widgets_allowed &&
        video_driver_has_widgets())
    {
       bool rarch_force_fullscreen = video_st->force_fullscreen;
